@@ -17,8 +17,26 @@ from src.mapping.aggregation import (
     compute_occupancy,
     compute_roughness,
 )
-from src.mapping.config import HazardConfig, MappingConfig, TraversabilityConfig
+from src.mapping.hazards import (
+    CurbCandidate,
+    HazardConfig,
+    OverhangCell,
+    PotholeCandidate,
+    detect_curb_candidates,
+    detect_map_hazards,
+    detect_overhang_cells,
+    detect_pothole_candidates,
+)
 from src.mapping.mapper import SemanticElevationMapper, SimpleFoveatedGridAdapter
+from src.mapping.terrain import (
+    TerrainAttributes,
+    TraversabilityState,
+    analyze_cell_terrain,
+    analyze_map_terrain,
+    compute_local_slope_and_step,
+    compute_point_density,
+    compute_traversability_score,
+)
 
 __all__ = [
     "MappingConfig",
@@ -31,4 +49,18 @@ __all__ = [
     "aggregate_cell",
     "SemanticElevationMapper",
     "SimpleFoveatedGridAdapter",
+    "TraversabilityState",
+    "TerrainAttributes",
+    "compute_point_density",
+    "compute_local_slope_and_step",
+    "compute_traversability_score",
+    "analyze_cell_terrain",
+    "analyze_map_terrain",
+    "CurbCandidate",
+    "PotholeCandidate",
+    "OverhangCell",
+    "detect_curb_candidates",
+    "detect_pothole_candidates",
+    "detect_overhang_cells",
+    "detect_map_hazards",
 ]
