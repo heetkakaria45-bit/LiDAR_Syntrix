@@ -3,7 +3,14 @@
 import numpy as np
 import pytest
 
-from src.contracts import GridCell, PointCloudFrame, SemanticMap, SemanticPointCloud
+from src.contracts import (
+    DatasetLabelMap,
+    GridCell,
+    PointCloudFrame,
+    SemanticMap,
+    SemanticPointCloud,
+    SyntheticSceneConfig,
+)
 
 
 def test_point_cloud_frame_valid() -> None:
@@ -101,6 +108,37 @@ def test_grid_cell_creation() -> None:
     assert cell.semantic_class == 0
     assert cell.occupancy == 0.99
     assert cell.point_count == 42
+    assert cell.observation_count == 1
+    assert cell.velocity is None
+    assert cell.uncertainty == 0.0
+
+
+def test_grid_cell_extended_attributes() -> None:
+    """Ensure GridCell supports velocity, uncertainty, and semantic probability vectors."""
+    probs = np.array([0.8, 0.1, 0.05, 0.02, 0.01, 0.01, 0.005, 0.005], dtype=np.float32)
+    cell = GridCell(
+        resolution_level="level_1",
+        cell_x=12.0,
+        cell_y=4.0,
+        elevation=0.5,
+        min_z=0.1,
+        max_z=1.8,
+        semantic_class=2,
+        confidence=0.80,
+        occupancy=1.0,
+        point_count=120,
+        roughness=0.02,
+        timestamp=105.0,
+        velocity=(12.5, 0.0, 0.0),
+        observation_count=5,
+        uncertainty=0.15,
+        semantic_probabilities=probs,
+    )
+
+    assert cell.velocity == (12.5, 0.0, 0.0)
+    assert cell.observation_count == 5
+    assert cell.uncertainty == 0.15
+    assert cell.semantic_probabilities.shape == (8,)
 
 
 def test_semantic_map_creation() -> None:
@@ -117,3 +155,27 @@ def test_semantic_map_creation() -> None:
     assert isinstance(sem_map.cells, dict)
     assert sem_map.sensor_pose.shape == (4, 4)
     assert sem_map.timestamp == 200.0
+
+
+def test_dataset_label_map() -> None:
+    """Ensure DatasetLabelMap correctly translates external class IDs into project IDs."""
+    mapping_dict = {
+        9: 0,   # road -> DRIVABLE_GROUND
+        1: 2,   # car -> VEHICLE
+        6: 3,   # person -> PEDESTRIAN
+    }
+    mapper = DatasetLabelMap(mapping_dict=mapping_dict, default_unmapped_class=7)
+
+    raw_labels = np.array([9, 9, 1, 6, 99], dtype=np.int32)
+    project_labels = mapper.map_labels(raw_labels)
+
+    expected = np.array([0, 0, 2, 3, 7], dtype=np.int32)
+    np.testing.assert_array_equal(project_labels, expected)
+
+
+def test_synthetic_scene_config() -> None:
+    """Ensure SyntheticSceneConfig initializes with sensible defaults."""
+    cfg = SyntheticSceneConfig(scene_type="curb", curb_height=0.18, seed=123)
+    assert cfg.scene_type == "curb"
+    assert cfg.curb_height == 0.18
+    assert cfg.seed == 123

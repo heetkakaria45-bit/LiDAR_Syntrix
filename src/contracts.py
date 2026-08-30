@@ -17,7 +17,7 @@ IMPORTANT:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 
@@ -66,7 +66,7 @@ class SemanticPointCloud:
     """
 
     points: np.ndarray  # Shape: (N, 3), dtype: float32
-    semantic_class: np.ndarray  # Shape: (N,), dtype: integer class ID
+    semantic_class: np.ndarray  # Shape: (N,), dtype: integer class ID (0..7)
     confidence: np.ndarray  # Shape: (N,), dtype: float32 in [0.0, 1.0]
     timestamp: float
     frame_id: str
@@ -101,18 +101,24 @@ class GridCell:
     Spatial indexing managed by: src/foveated_grid/ (Owner: Manashri)
     """
 
-    resolution_level: str  # e.g. "near", "mid_near", "mid", "far"
+    resolution_level: str  # e.g. "near", "mid_near", "mid", "far" or level index
     cell_x: float  # Center X coordinate in map/base frame (meters)
     cell_y: float  # Center Y coordinate in map/base frame (meters)
-    elevation: float  # Nominal elevation Z (mean or surface height)
+    elevation: float  # Nominal surface elevation Z
     min_z: float  # Minimum Z observed in cell
     max_z: float  # Maximum Z observed in cell
-    semantic_class: int  # Aggregated semantic class ID
+    semantic_class: int  # Aggregated semantic class ID (0..7)
     confidence: float  # Aggregated semantic confidence [0.0, 1.0]
     occupancy: float  # Occupancy probability [0.0, 1.0]
     point_count: int  # Number of raw LiDAR points falling in cell
     roughness: float  # Terrain surface roughness / height variance
     timestamp: float  # Timestamp of latest update
+
+    # Extended attributes for temporal filtering, dynamic tracking & adaptive refinement
+    velocity: Optional[Tuple[float, float, float]] = None  # (vx, vy, vz) in m/s
+    observation_count: int = 1  # Number of temporal observations
+    uncertainty: float = 0.0  # Elevation or semantic entropy uncertainty [0.0, 1.0]
+    semantic_probabilities: Optional[np.ndarray] = None  # Full 8-class probability distribution
 
 
 @dataclass
@@ -129,3 +135,32 @@ class SemanticMap:
     sensor_pose: np.ndarray  # 4x4 current sensor pose
     timestamp: float
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class DatasetLabelMap:
+    """Helper to map dataset-specific integer labels to project semantic classes (0..7)."""
+
+    mapping_dict: Dict[int, int]
+    default_unmapped_class: int = 7  # Default to OTHER_OBSTACLE
+
+    def map_labels(self, raw_labels: np.ndarray) -> np.ndarray:
+        """Map raw dataset label array to project class ID array."""
+        project_labels = np.full_like(raw_labels, self.default_unmapped_class, dtype=np.int32)
+        for raw_id, proj_id in self.mapping_dict.items():
+            project_labels[raw_labels == raw_id] = proj_id
+        return project_labels
+
+
+@dataclass
+class SyntheticSceneConfig:
+    """Configuration for deterministic synthetic geometric test scene generation."""
+
+    scene_type: str = "flat_road"  # e.g., "flat_road", "curb", "pothole", "slope", "overhang"
+    num_points: int = 5000
+    noise_std: float = 0.01  # Gaussian sensor noise in meters
+    road_width: float = 8.0
+    curb_height: float = 0.15  # 15 cm step
+    pothole_depth: float = 0.08  # 8 cm depression
+    slope_deg: float = 10.0  # 10 degrees incline
+    seed: int = 42

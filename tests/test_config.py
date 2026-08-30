@@ -1,9 +1,8 @@
 """Test configuration loading, schema structure, and parameter validation."""
 
 from pathlib import Path
-import yaml
 import pytest
-
+import yaml
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "configs" / "default_config.yaml"
 
@@ -31,38 +30,33 @@ def test_map_configuration(loaded_config):
 
 
 def test_foveation_levels(loaded_config):
-    """Verify all four initial foveation zones and their resolutions."""
+    """Verify all four initial foveation zones (Levels 0 through 3) and their resolutions."""
     foveation = loaded_config.get("foveation_levels", {})
 
-    expected_levels = {
-        "near": {"max_range": 10.0, "resolution": 0.05},
-        "mid_near": {"max_range": 25.0, "resolution": 0.10},
-        "mid": {"max_range": 50.0, "resolution": 0.25},
-        "far": {"max_range": 100.0, "resolution": 0.50},
-    }
+    expected_levels = [
+        {"key": "level_0", "name": "near", "max_range": 10.0, "resolution": 0.05},
+        {"key": "level_1", "name": "mid_near", "max_range": 25.0, "resolution": 0.10},
+        {"key": "level_2", "name": "mid", "max_range": 50.0, "resolution": 0.25},
+        {"key": "level_3", "name": "far", "max_range": 100.0, "resolution": 0.50},
+    ]
 
-    for level_name, expected_params in expected_levels.items():
-        assert level_name in foveation, f"Foveation level '{level_name}' missing from config"
-        level_cfg = foveation[level_name]
-        assert level_cfg["max_range"] == pytest.approx(expected_params["max_range"]), (
-            f"Level '{level_name}' max_range mismatch: expected {expected_params['max_range']}, "
-            f"got {level_cfg.get('max_range')}"
-        )
-        assert level_cfg["resolution"] == pytest.approx(expected_params["resolution"]), (
-            f"Level '{level_name}' resolution mismatch: expected {expected_params['resolution']}, "
-            f"got {level_cfg.get('resolution')}"
-        )
+    for item in expected_levels:
+        key = item["key"]
+        assert key in foveation, f"Level key '{key}' missing from foveation_levels"
+        cfg = foveation[key]
+        assert cfg["max_range"] == pytest.approx(item["max_range"])
+        assert cfg["resolution"] == pytest.approx(item["resolution"])
 
     # Monotonicity check: range and resolution increase outward
-    levels = ["near", "mid_near", "mid", "far"]
-    for i in range(len(levels) - 1):
-        curr_lvl = foveation[levels[i]]
-        next_lvl = foveation[levels[i + 1]]
+    keys = ["level_0", "level_1", "level_2", "level_3"]
+    for i in range(len(keys) - 1):
+        curr_lvl = foveation[keys[i]]
+        next_lvl = foveation[keys[i + 1]]
         assert curr_lvl["max_range"] < next_lvl["max_range"], (
-            f"max_range must increase monotonically: {levels[i]} vs {levels[i+1]}"
+            f"max_range must increase monotonically: {keys[i]} vs {keys[i+1]}"
         )
         assert curr_lvl["resolution"] < next_lvl["resolution"], (
-            f"resolution must coarsen outward: {levels[i]} vs {levels[i+1]}"
+            f"resolution must coarsen outward: {keys[i]} vs {keys[i+1]}"
         )
 
 
@@ -78,7 +72,35 @@ def test_semantic_classes(loaded_config):
         assert isinstance(classes[cid]["is_traversable"], bool)
 
     # Specific class assertions
-    assert classes[0]["name"] == "drivable_ground"
+    assert classes[0]["name"].upper() == "DRIVABLE_GROUND"
     assert classes[0]["is_traversable"] is True
-    assert classes[1]["name"] == "non_drivable_terrain"
+    assert classes[1]["name"].upper() == "NON_DRIVABLE_TERRAIN"
     assert classes[1]["is_traversable"] is False
+    assert classes[2]["name"].upper() == "VEHICLE"
+    assert classes[3]["name"].upper() == "PEDESTRIAN"
+
+
+def test_dataset_mappings_configured(loaded_config):
+    """Verify dataset label mapping tables for SemanticKITTI and nuScenes."""
+    mappings = loaded_config.get("dataset_label_mappings", {})
+    assert "semantickitti" in mappings, "SemanticKITTI mapping missing"
+    assert "nuscenes" in mappings, "nuScenes mapping missing"
+
+    kitti = mappings["semantickitti"]
+    # Check that road maps to 0 (DRIVABLE_GROUND)
+    assert kitti[9] == 0
+    # Check that car maps to 2 (VEHICLE)
+    assert kitti[1] == 2
+    # Check that pedestrian (6) maps to 3
+    assert kitti[6] == 3
+
+
+def test_hazard_thresholds(loaded_config):
+    """Verify geometric hazard detection thresholds."""
+    mapping_cfg = loaded_config.get("mapping", {})
+    hazards = mapping_cfg.get("hazards", {})
+
+    assert hazards.get("curb_min_step") == 0.08
+    assert hazards.get("curb_max_step") == 0.25
+    assert hazards.get("pothole_min_depth") == 0.05
+    assert hazards.get("overhang_min_clearance") == 2.2

@@ -5,8 +5,8 @@
 
 project:
   name: "foveated-lidar-sih"
-  version: "0.1.0"
-  description: "Foveated Semantic 2.5D LiDAR Mapping for Autonomous Navigation"
+  version: "0.2.0"
+  description: "Foveated Semantic 2.5D LiDAR Mapping for Autonomous Navigation (SIH 2026)"
 
 # Global spatial mapping parameters
 map:
@@ -17,111 +17,188 @@ map:
     up: "Z"
   units: "meters"
 
-# Foveated resolution hierarchy (extensible zone definitions)
+# Foveated resolution hierarchy (Levels 0 through 3)
 # Foveation zones are ordered by distance from the sensor origin (0, 0, 0)
 foveation_levels:
-  near:
+  level_0:
+    name: "near"
+    level_id: 0
     min_range: 0.0
     max_range: 10.0
     resolution: 0.05        # 5 cm grid resolution
     description: "High-resolution immediate vehicle vicinity (curbs, potholes, small hazards)"
-    semantic_priority: 1.0  # Weight multiplier for adaptive refinement
+    semantic_priority: 1.0
 
-  mid_near:
+  level_1:
+    name: "mid_near"
+    level_id: 1
     min_range: 10.0
     max_range: 25.0
     resolution: 0.10        # 10 cm grid resolution
     description: "Medium-high resolution tactical maneuvering zone (pedestrians, vehicles)"
     semantic_priority: 0.8
 
-  mid:
+  level_2:
+    name: "mid"
+    level_id: 2
     min_range: 25.0
     max_range: 50.0
     resolution: 0.25        # 25 cm grid resolution
     description: "Medium resolution intermediate perception zone"
     semantic_priority: 0.5
 
-  far:
+  level_3:
+    name: "far"
+    level_id: 3
     min_range: 50.0
     max_range: 100.0
     resolution: 0.50        # 50 cm grid resolution
     description: "Coarse resolution long-range horizon zone (buildings, distant obstacles)"
     semantic_priority: 0.2
 
-# Semantic class definitions (aligned with standard automotive LiDAR benchmarks)
-# Extensible: actual dataset adapters map raw labels into these target IDs
+# Semantic class definitions (Standard 8-Class Project Taxonomy)
 semantic_classes:
   0:
-    name: "drivable_ground"
+    name: "DRIVABLE_GROUND"
     description: "Road, asphalt, smooth traversable paths"
     is_traversable: true
     color_rgb: [128, 64, 128]
+    priority_weight: 0.1
   1:
-    name: "non_drivable_terrain"
+    name: "NON_DRIVABLE_TERRAIN"
     description: "Grass, dirt, gravel, rough unpaved ground"
     is_traversable: false
     color_rgb: [0, 100, 0]
+    priority_weight: 0.4
   2:
-    name: "vehicle"
+    name: "VEHICLE"
     description: "Cars, trucks, buses"
     is_traversable: false
     color_rgb: [0, 0, 142]
+    priority_weight: 0.9
   3:
-    name: "pedestrian"
+    name: "PEDESTRIAN"
     description: "People, walking humans"
     is_traversable: false
     color_rgb: [220, 20, 60]
+    priority_weight: 1.0    # Highest priority for safety
   4:
-    name: "cyclist"
+    name: "CYCLIST"
     description: "Bicyclists, motorcyclists"
     is_traversable: false
     color_rgb: [255, 0, 0]
+    priority_weight: 1.0
   5:
-    name: "pole"
-    description: "Traffic sign poles, light poles, trees"
+    name: "POLE"
+    description: "Traffic sign poles, light poles, tree trunks"
     is_traversable: false
     color_rgb: [153, 153, 153]
+    priority_weight: 0.6
   6:
-    name: "wall_building"
+    name: "WALL_BUILDING"
     description: "Walls, buildings, fences, guard rails"
     is_traversable: false
     color_rgb: [70, 70, 70]
+    priority_weight: 0.5
   7:
-    name: "other_obstacle"
+    name: "OTHER_OBSTACLE"
     description: "Debris, unclassified obstacles"
     is_traversable: false
     color_rgb: [250, 170, 30]
+    priority_weight: 0.7
 
-# Preprocessing defaults (Owner: Amulya)
+# Dataset-to-project label mappings
+dataset_label_mappings:
+  semantickitti:
+    9: 0   # road -> DRIVABLE_GROUND
+    11: 0  # parking -> DRIVABLE_GROUND
+    12: 0  # lane-marking -> DRIVABLE_GROUND
+    10: 1  # sidewalk -> NON_DRIVABLE_TERRAIN
+    13: 1  # other-ground -> NON_DRIVABLE_TERRAIN
+    14: 1  # building ground/vegetation
+    15: 1  # terrain
+    1: 2   # car -> VEHICLE
+    3: 2   # truck -> VEHICLE
+    4: 2   # other-vehicle -> VEHICLE
+    5: 2   # bus -> VEHICLE
+    6: 3   # person -> PEDESTRIAN
+    7: 4   # bicyclist -> CYCLIST
+    8: 4   # motorcyclist -> CYCLIST
+    17: 5  # pole -> POLE
+    18: 5  # traffic-sign -> POLE
+    16: 5  # trunk -> POLE
+    19: 6  # building -> WALL_BUILDING
+    20: 6  # fence -> WALL_BUILDING
+    0: 7   # unlabeled -> OTHER_OBSTACLE
+    21: 7  # other-object -> OTHER_OBSTACLE
+
+  nuscenes:
+    1: 0   # driveable_surface -> DRIVABLE_GROUND
+    2: 1   # sidewalk -> NON_DRIVABLE_TERRAIN
+    3: 1   # terrain -> NON_DRIVABLE_TERRAIN
+    4: 1   # vegetation -> NON_DRIVABLE_TERRAIN
+    5: 2   # car -> VEHICLE
+    6: 2   # truck -> VEHICLE
+    7: 2   # bus -> VEHICLE
+    8: 2   # trailer -> VEHICLE
+    9: 2   # construction_vehicle -> VEHICLE
+    10: 3  # pedestrian -> PEDESTRIAN
+    11: 4  # motorcycle -> CYCLIST
+    12: 4  # bicycle -> CYCLIST
+    13: 5  # barrier/pole -> POLE
+    15: 6  # manmade -> WALL_BUILDING
+    0: 7   # noise -> OTHER_OBSTACLE
+    14: 7  # static_other -> OTHER_OBSTACLE
+    16: 7  # other_flat -> OTHER_OBSTACLE
+
+# Preprocessing configuration (Owner: Amulya)
 preprocessing:
+  range_filter:
+    min_range: 0.5
+    max_range: 100.0
   outlier_removal:
     enabled: true
     nb_neighbors: 20
     std_ratio: 2.0
   voxel_downsample:
-    enabled: false          # Keep full resolution for foveated binning unless overridden
+    enabled: false
     leaf_size: 0.02
-  range_filter:
-    min_range: 0.5
-    max_range: 100.0
 
-# Perception defaults (Owner: Vedant)
+# Perception configuration (Owner: Vedant)
 perception:
   model_name: "point_cloud_segmenter"
   batch_size: 1
-  device: "cpu"             # Default fallback; override to 'cuda' on GPU machines
+  device: "cpu"
   confidence_threshold: 0.40
 
-# 2.5D Mapping defaults (Owner: Heet)
+# 2.5D Mapping & Hazard Detection configuration (Owner: Heet)
 mapping:
   occupancy_threshold: 0.50
   min_points_per_cell: 1
   traversability:
-    max_step_height: 0.15   # 15 cm max curb height for traversable classification
-    max_slope_deg: 15.0     # 15 degrees max slope
+    max_drivable_slope_deg: 15.0     # 15 deg max drivable slope
     roughness_threshold: 0.05
+  hazards:
+    curb_min_step: 0.08              # 8 cm minimum step for curb detection
+    curb_max_step: 0.25              # 25 cm maximum step for curb detection
+    pothole_min_depth: 0.05          # 5 cm depression depth for pothole detection
+    overhang_min_clearance: 2.2      # 2.2 m clearance for overhead structure traversability
 
-# Evaluation & Benchmark defaults (Owner: Himisha)
+# Temporal map update configuration (Owner: Heet & Atharva)
+temporal:
+  decay_factor: 0.95
+  min_observations_for_permanence: 2
+  dynamic_velocity_threshold: 0.5    # m/s to mark cell as dynamic obstacle
+
+# Adaptive refinement configuration (Forward-compatible)
+adaptive_refinement:
+  enabled: false                     # Activated in Phase I
+  distance_weight: 0.5
+  semantic_weight: 0.3
+  uncertainty_weight: 0.2
+  uncertainty_threshold: 0.65
+
+# Evaluation & Benchmark configuration (Owner: Himisha)
 evaluation:
   distance_bins: [10.0, 25.0, 50.0, 100.0]
-  metrics: ["iou", "miou", "elevation_rmse", "fps", "latency_ms", "memory_mb"]
+  metrics: ["miou", "iou_per_class", "elevation_rmse", "fps", "latency_ms", "memory_mb"]

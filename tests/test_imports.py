@@ -8,6 +8,7 @@ MODULE_NAMES = [
     "src",
     "src.contracts",
     "src.preprocessing",
+    "src.preprocessing.synthetic",
     "src.perception",
     "src.foveated_grid",
     "src.mapping",
