@@ -1,0 +1,131 @@
+"""Core Shared Data Contracts.
+
+This module defines lightweight, typed data schemas for data exchange between
+the independent pipeline modules:
+    - Preprocessing  -> PointCloudFrame
+    - Perception     -> SemanticPointCloud
+    - Foveated Grid  -> Spatial Indexing & Cell Coordinates
+    - Mapping        -> GridCell & SemanticMap
+    - Integration    -> Pipeline Orchestration
+    - Evaluation     -> Benchmark Inputs & Metric Outputs
+
+IMPORTANT:
+    These structures are the shared contracts across the team.
+    Any breaking changes must follow the RFC procedure defined in CONTRACTS.md.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional
+import numpy as np
+
+
+@dataclass
+class PointCloudFrame:
+    """Standardized ingested raw or filtered LiDAR frame.
+
+    Coordinate system:
+        X = Forward
+        Y = Left
+        Z = Up
+    Units: Meters
+    """
+
+    points: np.ndarray  # Shape: (N, 3), dtype: float32
+    timestamp: float
+    frame_id: str
+    intensity: Optional[np.ndarray] = None  # Shape: (N,), dtype: float32
+    sensor_pose: np.ndarray = field(
+        default_factory=lambda: np.eye(4, dtype=np.float64)
+    )  # 4x4 transformation matrix [R | t]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.points, np.ndarray):
+            self.points = np.asarray(self.points, dtype=np.float32)
+        if self.points.ndim != 2 or self.points.shape[1] != 3:
+            raise ValueError(
+                f"points array must have shape (N, 3), got {self.points.shape}"
+            )
+        if self.intensity is not None:
+            if not isinstance(self.intensity, np.ndarray):
+                self.intensity = np.asarray(self.intensity, dtype=np.float32)
+            if self.intensity.ndim != 1 or self.intensity.shape[0] != self.points.shape[0]:
+                raise ValueError(
+                    f"intensity array must have shape (N,), got {self.intensity.shape} "
+                    f"for points of length {self.points.shape[0]}"
+                )
+
+
+@dataclass
+class SemanticPointCloud:
+    """Point cloud with per-point semantic predictions and confidence scores.
+
+    Produced by: src/perception/ (Owner: Vedant)
+    Consumed by: src/foveated_grid/ and src/mapping/
+    """
+
+    points: np.ndarray  # Shape: (N, 3), dtype: float32
+    semantic_class: np.ndarray  # Shape: (N,), dtype: integer class ID
+    confidence: np.ndarray  # Shape: (N,), dtype: float32 in [0.0, 1.0]
+    timestamp: float
+    frame_id: str
+    intensity: Optional[np.ndarray] = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.points, np.ndarray):
+            self.points = np.asarray(self.points, dtype=np.float32)
+        if not isinstance(self.semantic_class, np.ndarray):
+            self.semantic_class = np.asarray(self.semantic_class, dtype=np.int32)
+        if not isinstance(self.confidence, np.ndarray):
+            self.confidence = np.asarray(self.confidence, dtype=np.float32)
+
+        num_points = self.points.shape[0]
+        if self.points.ndim != 2 or self.points.shape[1] != 3:
+            raise ValueError(f"points must have shape (N, 3), got {self.points.shape}")
+        if self.semantic_class.shape != (num_points,):
+            raise ValueError(
+                f"semantic_class shape {self.semantic_class.shape} does not match N={num_points}"
+            )
+        if self.confidence.shape != (num_points,):
+            raise ValueError(
+                f"confidence shape {self.confidence.shape} does not match N={num_points}"
+            )
+
+
+@dataclass
+class GridCell:
+    """A single cell within a 2.5D multi-resolution semantic grid.
+
+    Produced by: src/mapping/ (Owner: Heet)
+    Spatial indexing managed by: src/foveated_grid/ (Owner: Manashri)
+    """
+
+    resolution_level: str  # e.g. "near", "mid_near", "mid", "far"
+    cell_x: float  # Center X coordinate in map/base frame (meters)
+    cell_y: float  # Center Y coordinate in map/base frame (meters)
+    elevation: float  # Nominal elevation Z (mean or surface height)
+    min_z: float  # Minimum Z observed in cell
+    max_z: float  # Maximum Z observed in cell
+    semantic_class: int  # Aggregated semantic class ID
+    confidence: float  # Aggregated semantic confidence [0.0, 1.0]
+    occupancy: float  # Occupancy probability [0.0, 1.0]
+    point_count: int  # Number of raw LiDAR points falling in cell
+    roughness: float  # Terrain surface roughness / height variance
+    timestamp: float  # Timestamp of latest update
+
+
+@dataclass
+class SemanticMap:
+    """Complete multi-resolution 2.5D Semantic Elevation Map.
+
+    Produced by: src/mapping/ (Owner: Heet)
+    Visualized by: src/visualization/ (Owner: Atharva)
+    Evaluated by: src/evaluation/ (Owner: Himisha)
+    """
+
+    cells: Dict[str, Any]  # Map representation (e.g. dict of level -> cell array/sparse index)
+    resolution_levels: Dict[str, Any]  # Active resolution definitions
+    sensor_pose: np.ndarray  # 4x4 current sensor pose
+    timestamp: float
+    metadata: Dict[str, Any] = field(default_factory=dict)

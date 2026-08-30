@@ -1,0 +1,127 @@
+# Foveated Semantic 2.5D LiDAR Mapping — System Configuration
+# All coordinates and distance metrics follow:
+#   Coordinate frame: X = Forward, Y = Left, Z = Up
+#   Units: Meters, Angles in Radians, Timestamps in Seconds
+
+project:
+  name: "foveated-lidar-sih"
+  version: "0.1.0"
+  description: "Foveated Semantic 2.5D LiDAR Mapping for Autonomous Navigation"
+
+# Global spatial mapping parameters
+map:
+  max_radius: 100.0         # Maximum outer sensing/mapping radius (meters)
+  coordinate_convention:
+    forward: "X"
+    left: "Y"
+    up: "Z"
+  units: "meters"
+
+# Foveated resolution hierarchy (extensible zone definitions)
+# Foveation zones are ordered by distance from the sensor origin (0, 0, 0)
+foveation_levels:
+  near:
+    min_range: 0.0
+    max_range: 10.0
+    resolution: 0.05        # 5 cm grid resolution
+    description: "High-resolution immediate vehicle vicinity (curbs, potholes, small hazards)"
+    semantic_priority: 1.0  # Weight multiplier for adaptive refinement
+
+  mid_near:
+    min_range: 10.0
+    max_range: 25.0
+    resolution: 0.10        # 10 cm grid resolution
+    description: "Medium-high resolution tactical maneuvering zone (pedestrians, vehicles)"
+    semantic_priority: 0.8
+
+  mid:
+    min_range: 25.0
+    max_range: 50.0
+    resolution: 0.25        # 25 cm grid resolution
+    description: "Medium resolution intermediate perception zone"
+    semantic_priority: 0.5
+
+  far:
+    min_range: 50.0
+    max_range: 100.0
+    resolution: 0.50        # 50 cm grid resolution
+    description: "Coarse resolution long-range horizon zone (buildings, distant obstacles)"
+    semantic_priority: 0.2
+
+# Semantic class definitions (aligned with standard automotive LiDAR benchmarks)
+# Extensible: actual dataset adapters map raw labels into these target IDs
+semantic_classes:
+  0:
+    name: "drivable_ground"
+    description: "Road, asphalt, smooth traversable paths"
+    is_traversable: true
+    color_rgb: [128, 64, 128]
+  1:
+    name: "non_drivable_terrain"
+    description: "Grass, dirt, gravel, rough unpaved ground"
+    is_traversable: false
+    color_rgb: [0, 100, 0]
+  2:
+    name: "vehicle"
+    description: "Cars, trucks, buses"
+    is_traversable: false
+    color_rgb: [0, 0, 142]
+  3:
+    name: "pedestrian"
+    description: "People, walking humans"
+    is_traversable: false
+    color_rgb: [220, 20, 60]
+  4:
+    name: "cyclist"
+    description: "Bicyclists, motorcyclists"
+    is_traversable: false
+    color_rgb: [255, 0, 0]
+  5:
+    name: "pole"
+    description: "Traffic sign poles, light poles, trees"
+    is_traversable: false
+    color_rgb: [153, 153, 153]
+  6:
+    name: "wall_building"
+    description: "Walls, buildings, fences, guard rails"
+    is_traversable: false
+    color_rgb: [70, 70, 70]
+  7:
+    name: "other_obstacle"
+    description: "Debris, unclassified obstacles"
+    is_traversable: false
+    color_rgb: [250, 170, 30]
+
+# Preprocessing defaults (Owner: Amulya)
+preprocessing:
+  outlier_removal:
+    enabled: true
+    nb_neighbors: 20
+    std_ratio: 2.0
+  voxel_downsample:
+    enabled: false          # Keep full resolution for foveated binning unless overridden
+    leaf_size: 0.02
+  range_filter:
+    min_range: 0.5
+    max_range: 100.0
+
+# Perception defaults (Owner: Vedant)
+perception:
+  model_name: "point_cloud_segmenter"
+  batch_size: 1
+  device: "cpu"             # Default fallback; override to 'cuda' on GPU machines
+  confidence_threshold: 0.40
+
+# 2.5D Mapping defaults (Owner: Heet)
+mapping:
+  occupancy_threshold: 0.50
+  min_points_per_cell: 1
+  traversability:
+    max_step_height: 0.15   # 15 cm max curb height for traversable classification
+    max_slope_deg: 15.0     # 15 degrees max slope
+    roughness_threshold: 0.05
+
+# Evaluation & Benchmark defaults (Owner: Himisha)
+evaluation:
+  distance_bins: [10.0, 25.0, 50.0, 100.0]
+  metrics: ["iou", "miou", "elevation_rmse", "fps", "latency_ms", "memory_mb"]

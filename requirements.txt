@@ -1,0 +1,6 @@
+# Foundational dependencies (lightweight, cross-platform)
+numpy>=1.24.0
+pyyaml>=6.0
+
+# Development and testing
+pytest>=7.0.0
