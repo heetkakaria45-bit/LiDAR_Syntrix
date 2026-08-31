@@ -160,9 +160,9 @@ def test_semantic_map_creation() -> None:
 def test_dataset_label_map() -> None:
     """Ensure DatasetLabelMap correctly translates external class IDs into project IDs."""
     mapping_dict = {
-        9: 0,   # road -> DRIVABLE_GROUND
-        1: 2,   # car -> VEHICLE
-        6: 3,   # person -> PEDESTRIAN
+        9: 0,  # road -> DRIVABLE_GROUND
+        1: 2,  # car -> VEHICLE
+        6: 3,  # person -> PEDESTRIAN
     }
     mapper = DatasetLabelMap(mapping_dict=mapping_dict, default_unmapped_class=7)
 

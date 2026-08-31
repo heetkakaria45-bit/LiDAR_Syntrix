@@ -1,8 +1,8 @@
 """Test package imports and module discovery across all 6 developer domains."""
 
 import importlib
-import pytest
 
+import pytest
 
 MODULE_NAMES = [
     "src",
