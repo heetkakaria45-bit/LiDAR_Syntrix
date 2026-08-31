@@ -46,6 +46,8 @@ def generate_synthetic_scene(
         points, classes = _generate_slope_scene(config, rng)
     elif scene_type == "overhang":
         points, classes = _generate_overhang_scene(config, rng)
+    elif scene_type == "wall":
+        points, classes = _generate_wall_scene(config, rng)
     else:
         # Default comprehensive multi-obstacle urban scene
         points, classes = _generate_urban_scene(config, rng)
@@ -224,3 +226,28 @@ def _generate_urban_scene(
     points = np.vstack(pts_list)
     classes = np.concatenate(cls_list)
     return points, classes
+
+
+def _generate_wall_scene(
+    cfg: SyntheticSceneConfig, rng: np.random.Generator
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Generate drivable road with a vertical building/wall facade along y = 4.0m."""
+    n_road = int(cfg.num_points * 0.6)
+    n_wall = cfg.num_points - n_road
+
+    # Road surface
+    xr = rng.uniform(0.5, 40.0, n_road).astype(np.float32)
+    yr = rng.uniform(-4.0, 3.8, n_road).astype(np.float32)
+    zr = rng.normal(0.0, cfg.noise_std, n_road).astype(np.float32)
+    cr = np.zeros((n_road,), dtype=np.int32)
+
+    # Vertical wall at y ~ 4.0m, height up to 4.0m
+    xw = rng.uniform(0.5, 40.0, n_wall).astype(np.float32)
+    yw = (4.0 + rng.normal(0.0, cfg.noise_std, n_wall)).astype(np.float32)
+    zw = rng.uniform(0.0, 4.0, n_wall).astype(np.float32)
+    cw = np.full((n_wall,), 6, dtype=np.int32)  # WALL_BUILDING
+
+    points = np.vstack([np.stack([xr, yr, zr], axis=1), np.stack([xw, yw, zw], axis=1)])
+    classes = np.concatenate([cr, cw])
+    return points, classes
+
