@@ -1,6 +1,7 @@
 """Test configuration loading, schema structure, and parameter validation."""
 
 from pathlib import Path
+
 import pytest
 import yaml
 
@@ -53,10 +54,10 @@ def test_foveation_levels(loaded_config):
         curr_lvl = foveation[keys[i]]
         next_lvl = foveation[keys[i + 1]]
         assert curr_lvl["max_range"] < next_lvl["max_range"], (
-            f"max_range must increase monotonically: {keys[i]} vs {keys[i+1]}"
+            f"max_range must increase monotonically: {keys[i]} vs {keys[i + 1]}"
         )
         assert curr_lvl["resolution"] < next_lvl["resolution"], (
-            f"resolution must coarsen outward: {keys[i]} vs {keys[i+1]}"
+            f"resolution must coarsen outward: {keys[i]} vs {keys[i + 1]}"
         )
 
 

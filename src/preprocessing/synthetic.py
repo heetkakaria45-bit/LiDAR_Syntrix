@@ -16,6 +16,7 @@ integration, and benchmarking deterministically before live datasets are ingeste
 """
 
 from typing import Optional, Tuple
+
 import numpy as np
 
 from src.contracts import PointCloudFrame, SemanticPointCloud, SyntheticSceneConfig

@@ -28,9 +28,7 @@ def test_synthetic_scenes_generate_valid_contracts(scene_type: str) -> None:
     assert semantic_cloud.points.shape == frame.points.shape
     assert semantic_cloud.semantic_class.shape == (1000,)
     assert semantic_cloud.confidence.shape == (1000,)
-    assert (semantic_cloud.confidence >= 0.0).all() and (
-        semantic_cloud.confidence <= 1.0
-    ).all()
+    assert (semantic_cloud.confidence >= 0.0).all() and (semantic_cloud.confidence <= 1.0).all()
 
 
 def test_synthetic_generator_is_deterministic() -> None:

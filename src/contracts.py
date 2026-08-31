@@ -17,7 +17,8 @@ IMPORTANT:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
+
 import numpy as np
 
 
@@ -44,9 +45,7 @@ class PointCloudFrame:
         if not isinstance(self.points, np.ndarray):
             self.points = np.asarray(self.points, dtype=np.float32)
         if self.points.ndim != 2 or self.points.shape[1] != 3:
-            raise ValueError(
-                f"points array must have shape (N, 3), got {self.points.shape}"
-            )
+            raise ValueError(f"points array must have shape (N, 3), got {self.points.shape}")
         if self.intensity is not None:
             if not isinstance(self.intensity, np.ndarray):
                 self.intensity = np.asarray(self.intensity, dtype=np.float32)
