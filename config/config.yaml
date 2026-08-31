@@ -1,0 +1,167 @@
+# ==============================================================================
+# FOVEATED SEMANTIC 2.5D LIDAR MAPPING - CENTRAL CONFIGURATION
+# ==============================================================================
+# All spatial units are in METERS unless explicitly noted.
+# Angular units are in RADIANS.
+# Timestamps are in SECONDS (float64) or NANOSECONDS (int64) where specified.
+# ==============================================================================
+
+version: "1.0.0"
+
+# ------------------------------------------------------------------------------
+# 1. Coordinate System Definition (FROZEN)
+# ------------------------------------------------------------------------------
+coordinate_system:
+  convention: "FLU" # Forward-Left-Up
+  axes:
+    x: "forward"
+    y: "left"
+    z: "up"
+  units: "meters"
+
+# ------------------------------------------------------------------------------
+# 2. Foveated Spatial Representation Configuration (FROZEN ARCHITECTURE VALUES)
+# ------------------------------------------------------------------------------
+# Distance boundaries are evaluated in Euclidean distance on the XY ground plane:
+# r = sqrt(x^2 + y^2)
+# Interval semantics: [min_radius, max_radius) except for the outermost boundary
+# which includes max_range: [50.0, 100.0]
+# ------------------------------------------------------------------------------
+foveation:
+  max_range_m: 100.0
+  min_range_m: 0.0
+  levels:
+    - level: 0
+      min_radius_m: 0.0
+      max_radius_m: 10.0
+      cell_resolution_m: 0.05
+      description: "Immediate proximity zone (ultra-high fidelity)"
+    - level: 1
+      min_radius_m: 10.0
+      max_radius_m: 25.0
+      cell_resolution_m: 0.10
+      description: "Short-range reaction zone (high fidelity)"
+    - level: 2
+      min_radius_m: 25.0
+      max_radius_m: 50.0
+      cell_resolution_m: 0.25
+      description: "Medium-range planning zone (standard fidelity)"
+    - level: 3
+      min_radius_m: 50.0
+      max_radius_m: 100.0
+      cell_resolution_m: 0.50
+      description: "Long-range situational awareness zone (coarse fidelity)"
+
+  # Architectural extension hook for future adaptive foveation:
+  # resolution = f(distance, semantic_importance, uncertainty)
+  # (Adaptive refinement logic is NOT implemented in Phase 2 scaffolding)
+  adaptive_refinement:
+    enabled: false
+    importance_weight: 0.0
+    uncertainty_weight: 0.0
+
+# ------------------------------------------------------------------------------
+# 3. Semantic Taxonomy (FROZEN)
+# ------------------------------------------------------------------------------
+# External datasets (SemanticKITTI, nuScenes, Waymo) MUST map to this taxonomy
+# via dedicated dataset adapters. Do NOT modify these core IDs.
+# ------------------------------------------------------------------------------
+semantics:
+  num_classes: 8
+  classes:
+    0:
+      name: "DRIVABLE_GROUND"
+      description: "Paved road, asphalt, smooth navigable terrain"
+      is_obstacle: false
+      is_ground: true
+      default_traversable: true
+    1:
+      name: "NON_DRIVABLE_TERRAIN"
+      description: "Grass, dirt, gravel, vegetation, non-navigable ground"
+      is_obstacle: true
+      is_ground: true
+      default_traversable: false
+    2:
+      name: "VEHICLE"
+      description: "Cars, trucks, buses, trailers, construction vehicles"
+      is_obstacle: true
+      is_ground: false
+      default_traversable: false
+    3:
+      name: "PEDESTRIAN"
+      description: "Pedestrians, standing/walking persons"
+      is_obstacle: true
+      is_ground: false
+      default_traversable: false
+    4:
+      name: "CYCLIST"
+      description: "Bicyclists, motorcyclists and their mounts"
+      is_obstacle: true
+      is_ground: false
+      default_traversable: false
+    5:
+      name: "POLE"
+      description: "Traffic signs, utility poles, light poles, tree trunks"
+      is_obstacle: true
+      is_ground: false
+      default_traversable: false
+    6:
+      name: "WALL_BUILDING"
+      description: "Walls, fences, building facades, static barriers"
+      is_obstacle: true
+      is_ground: false
+      default_traversable: false
+    7:
+      name: "OTHER_OBSTACLE"
+      description: "Debris, unclassified obstacles, barriers, curbs"
+      is_obstacle: true
+      is_ground: false
+      default_traversable: false
+
+# ------------------------------------------------------------------------------
+# 4. Preprocessing Parameters (Default Scaffolding)
+# ------------------------------------------------------------------------------
+preprocessing:
+  crop_box:
+    min_x: -100.0
+    max_x: 100.0
+    min_y: -100.0
+    max_y: 100.0
+    min_z: -5.0
+    max_z: 10.0
+  filter_nans: true
+  min_intensity: 0.0
+  max_intensity: 255.0
+
+# ------------------------------------------------------------------------------
+# 5. 2.5D Semantic Mapping Parameters (Default Scaffolding)
+# ------------------------------------------------------------------------------
+mapping:
+  temporal_decay_factor: 0.95
+  max_points_per_cell: 500
+  occupancy_threshold: 0.5
+  ground_elevation_default: 0.0
+  traversability:
+    max_step_height_m: 0.15
+    max_slope_rad: 0.35 # ~20 degrees
+    roughness_threshold_m: 0.05
+
+# ------------------------------------------------------------------------------
+# 6. Runtime & Telemetry Measurement Settings
+# ------------------------------------------------------------------------------
+# Telemetry flags and measurement configurations (Zero-fabrication contract:
+# performance requirements are metrics to measure, NOT fabricated constants).
+# ------------------------------------------------------------------------------
+runtime:
+  enable_telemetry: true
+  timer_backend: "time.perf_counter"
+  warmup_frames: 10
+  profile_memory: true
+
+# ------------------------------------------------------------------------------
+# 7. Visualization & Control Center Defaults
+# ------------------------------------------------------------------------------
+visualization:
+  window_title: "Autonomous Perception Control Center - 2.5D Foveated LiDAR"
+  default_view_mode: "FOVEATED_SEMANTIC_ELEVATION"
+  color_map: "ACCENT"
