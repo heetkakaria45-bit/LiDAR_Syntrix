@@ -11,10 +11,13 @@ Responsibilities:
 
 from __future__ import annotations
 
+import math
 from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 from src.contracts import GridCell
+
+_LOG_NUM_CLASSES = math.log(8.0)
 
 
 def compute_elevation_bounds(
@@ -33,6 +36,40 @@ def compute_elevation_bounds(
     Raises:
         ValueError: If z_coords is empty or contains no finite values.
     """
+    n = z_coords.size
+    if n == 0:
+        raise ValueError("Cannot compute elevation bounds on empty or all-non-finite Z array.")
+
+    # Fast path for single-point array
+    if n == 1:
+        v = float(z_coords[0])
+        if not math.isfinite(v):
+            raise ValueError("Cannot compute elevation bounds on empty or all-non-finite Z array.")
+        return v, v, v
+
+    # Fast path for 2-point array
+    if n == 2:
+        v0 = float(z_coords[0])
+        v1 = float(z_coords[1])
+        f0 = math.isfinite(v0)
+        f1 = math.isfinite(v1)
+        if f0 and f1:
+            min_z = v0 if v0 < v1 else v1
+            max_z = v0 if v0 > v1 else v1
+            if strategy == "lowest":
+                elevation = min_z
+            elif strategy == "mean" or strategy == "median":
+                elevation = (v0 + v1) / 2.0
+            else:
+                elevation = (v0 + v1) / 2.0
+            return elevation, min_z, max_z
+        elif f0:
+            return v0, v0, v0
+        elif f1:
+            return v1, v1, v1
+        else:
+            raise ValueError("Cannot compute elevation bounds on empty or all-non-finite Z array.")
+
     valid = z_coords[np.isfinite(z_coords)]
     if valid.size == 0:
         raise ValueError("Cannot compute elevation bounds on empty or all-non-finite Z array.")
@@ -71,6 +108,17 @@ def compute_roughness(z_coords: np.ndarray) -> float:
     Returns:
         Roughness value in meters (>= 0.0).
     """
+    n = z_coords.size
+    if n <= 1:
+        return 0.0
+
+    if n == 2:
+        v0 = float(z_coords[0])
+        v1 = float(z_coords[1])
+        if math.isfinite(v0) and math.isfinite(v1):
+            return abs(v0 - v1) * 0.7071067811865476  # 1 / sqrt(2)
+        return 0.0
+
     valid = z_coords[np.isfinite(z_coords)]
     if valid.size <= 1:
         return 0.0
@@ -86,7 +134,7 @@ def aggregate_semantics(
 
     Method:
         1. Accumulate score for class c: score(c) = sum(confidence_i for point_i where class == c).
-        2. Dominant class = argmax_c score(c). If all scores are zero, defaults to the most frequent class.
+        2. Dominant class = argmax_c score(c). If all scores zero, defaults to most frequent class.
         3. Aggregated confidence = mean confidence of points predicting the dominant class.
         4. Normalize class scores to obtain a valid probability distribution over all 8 classes.
 
@@ -98,36 +146,60 @@ def aggregate_semantics(
     Returns:
         (dominant_class, aggregated_confidence, semantic_probabilities)
     """
-    if classes.size == 0:
+    n = classes.size
+    if n == 0:
         uniform_probs = np.full((num_classes,), 1.0 / num_classes, dtype=np.float32)
         return 7, 0.0, uniform_probs  # 7: OTHER_OBSTACLE
 
-    # Ensure finite confidences clipped to [0.0, 1.0]
-    safe_conf = np.nan_to_num(confidences, nan=0.0, posinf=1.0, neginf=0.0)
-    safe_conf = np.clip(safe_conf, 0.0, 1.0)
+    if n == 1:
+        c = int(classes[0])
+        conf = float(confidences[0])
+        if math.isnan(conf) or conf < 0.0:
+            conf = 0.0
+        elif conf > 1.0:
+            conf = 1.0
+        if not (0 <= c < num_classes):
+            c = 7
+        probs = np.zeros(num_classes, dtype=np.float32)
+        probs[c] = 1.0
+        return c, conf, probs
 
-    class_scores = np.zeros(num_classes, dtype=np.float64)
-    for c, conf in zip(classes, safe_conf):
+    # Fast direct accumulation for N >= 2 avoiding heavy np.nan_to_num wrapper
+    class_scores = [0.0] * num_classes
+    class_conf_sums = [0.0] * num_classes
+    class_counts = [0] * num_classes
+    total_score = 0.0
+
+    for i in range(n):
+        c = int(classes[i])
+        conf = float(confidences[i])
+        if math.isnan(conf) or conf < 0.0:
+            conf = 0.0
+        elif conf > 1.0:
+            conf = 1.0
+
         if 0 <= c < num_classes:
-            class_scores[c] += float(conf)
+            class_scores[c] += conf
+            total_score += conf
+            class_conf_sums[c] += conf
+            class_counts[c] += 1
 
-    total_score = float(np.sum(class_scores))
     if total_score > 0.0:
-        probs = (class_scores / total_score).astype(np.float32)
+        inv_tot = 1.0 / total_score
+        probs = np.array([s * inv_tot for s in class_scores], dtype=np.float32)
+        # Find dominant class (first max index for deterministic tie breaking)
         dominant_class = int(np.argmax(class_scores))
+        dom_count = class_counts[dominant_class]
+        agg_conf = float(class_conf_sums[dominant_class] / dom_count) if dom_count > 0 else 0.0
     else:
         # Fallback to majority count if all confidences are zero
-        counts = np.bincount(classes[classes < num_classes], minlength=num_classes)
-        dominant_class = int(np.argmax(counts))
-        probs = np.zeros(num_classes, dtype=np.float32)
-        if np.sum(counts) > 0:
-            probs = (counts / np.sum(counts)).astype(np.float32)
-
-    # Aggregated confidence: average confidence of points voting for dominant_class
-    dom_mask = classes == dominant_class
-    if np.any(dom_mask):
-        agg_conf = float(np.mean(safe_conf[dom_mask]))
-    else:
+        dominant_class = int(np.argmax(class_counts)) if any(class_counts) else 7
+        sum_c = sum(class_counts)
+        if sum_c > 0:
+            inv_c = 1.0 / sum_c
+            probs = np.array([c * inv_c for c in class_counts], dtype=np.float32)
+        else:
+            probs = np.zeros(num_classes, dtype=np.float32)
         agg_conf = 0.0
 
     return dominant_class, agg_conf, probs
@@ -145,7 +217,6 @@ def compute_occupancy(
         We use an exponential saturation model:
             P(occ) = 1.0 - exp(-N / N_ref)
         Where N is point count, and N_ref is reference points needed for ~63% occupancy.
-        For N=1: ~0.28, N=3: ~0.63, N=5: ~0.81, N>=10: ~0.97.
         Result is strictly guaranteed to lie in [0.0, 1.0].
 
     Args:
@@ -157,8 +228,8 @@ def compute_occupancy(
     """
     if point_count <= 0:
         return 0.0
-    occ = 1.0 - np.exp(-float(point_count) / float(ref_points))
-    return float(np.clip(occ, 0.0, 1.0))
+    occ = 1.0 - math.exp(-float(point_count) / float(ref_points))
+    return float(min(1.0, max(0.0, occ)))
 
 
 def aggregate_cell(
@@ -190,25 +261,107 @@ def aggregate_cell(
     Returns:
         Fully populated GridCell, or None if points_z contains no valid points.
     """
+    n = points_z.size
+    if n == 0:
+        return None
+
+    # Optimized single-point fast path (covers ~70% of LiDAR cells)
+    if n == 1:
+        z0 = float(points_z[0])
+        if not math.isfinite(z0):
+            return None
+        c0 = int(classes[0])
+        conf0 = float(confidences[0])
+        if math.isnan(conf0) or conf0 < 0.0:
+            conf0 = 0.0
+        elif conf0 > 1.0:
+            conf0 = 1.0
+        if not (0 <= c0 < 8):
+            c0 = 7
+        probs = np.zeros(8, dtype=np.float32)
+        probs[c0] = 1.0
+        occ = 1.0 - math.exp(-1.0 / ref_points)
+        return GridCell(
+            resolution_level=resolution_level,
+            cell_x=float(cell_x),
+            cell_y=float(cell_y),
+            elevation=z0,
+            min_z=z0,
+            max_z=z0,
+            semantic_class=c0,
+            confidence=conf0,
+            occupancy=float(min(1.0, max(0.0, occ))),
+            point_count=1,
+            roughness=0.0,
+            timestamp=float(timestamp),
+            velocity=None,
+            observation_count=observation_count,
+            uncertainty=0.0,
+            semantic_probabilities=probs,
+        )
+
+    # General path: check validity
     valid_mask = np.isfinite(points_z)
     if not np.any(valid_mask):
         return None
 
-    z_valid = points_z[valid_mask]
-    c_valid = classes[valid_mask]
-    conf_valid = confidences[valid_mask]
+    if np.all(valid_mask):
+        z_valid = points_z
+        c_valid = classes
+        conf_valid = confidences
+    else:
+        z_valid = points_z[valid_mask]
+        c_valid = classes[valid_mask]
+        conf_valid = confidences[valid_mask]
+
     point_count = int(z_valid.size)
+    if point_count == 0:
+        return None
+
+    # Re-check single valid point after filtering
+    if point_count == 1:
+        z0 = float(z_valid[0])
+        c0 = int(c_valid[0])
+        conf0 = float(conf_valid[0])
+        if math.isnan(conf0) or conf0 < 0.0:
+            conf0 = 0.0
+        elif conf0 > 1.0:
+            conf0 = 1.0
+        if not (0 <= c0 < 8):
+            c0 = 7
+        probs = np.zeros(8, dtype=np.float32)
+        probs[c0] = 1.0
+        occ = 1.0 - math.exp(-1.0 / ref_points)
+        return GridCell(
+            resolution_level=resolution_level,
+            cell_x=float(cell_x),
+            cell_y=float(cell_y),
+            elevation=z0,
+            min_z=z0,
+            max_z=z0,
+            semantic_class=c0,
+            confidence=conf0,
+            occupancy=float(min(1.0, max(0.0, occ))),
+            point_count=1,
+            roughness=0.0,
+            timestamp=float(timestamp),
+            velocity=None,
+            observation_count=observation_count,
+            uncertainty=0.0,
+            semantic_probabilities=probs,
+        )
 
     elevation, min_z, max_z = compute_elevation_bounds(z_valid, strategy=strategy)
     roughness = compute_roughness(z_valid)
     dominant_class, agg_conf, probs = aggregate_semantics(c_valid, conf_valid)
     occupancy = compute_occupancy(point_count, ref_points=ref_points)
 
-    # Uncertainty can be derived from semantic entropy or elevation dispersion
-    # Normalized semantic entropy: H / log(8)
-    epsilon = 1e-7
-    entropy = -np.sum(probs * np.log(probs + epsilon)) / np.log(8.0)
-    uncertainty = float(np.clip(entropy, 0.0, 1.0))
+    # Uncertainty from semantic entropy
+    ent = 0.0
+    for p in probs:
+        if p > 1e-7:
+            ent -= float(p) * math.log(float(p))
+    uncertainty = float(min(1.0, max(0.0, ent / _LOG_NUM_CLASSES)))
 
     return GridCell(
         resolution_level=resolution_level,

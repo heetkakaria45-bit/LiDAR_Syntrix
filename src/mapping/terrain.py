@@ -75,8 +75,8 @@ def compute_local_slope_and_step(
 
     Formulation:
         For cells with neighbors, fit a local planar gradient:
-            z(x, y) = a * (x - x0) + b * (y - y0) + c
-        Using least-squares regression over the 3x3 local neighborhood:
+            dz(x, y) = a * (x - x0) + b * (y - y0)
+        Using exact 2x2 normal equations for least-squares regression over the neighborhood:
             gradient vector = (a, b)
             slope = arctan(sqrt(a^2 + b^2))
         Also compute the maximum absolute vertical step:
@@ -94,33 +94,49 @@ def compute_local_slope_and_step(
     if not neighbors:
         return float("nan"), float("nan"), 0.0
 
-    # Calculate max elevation step to any neighbor
-    steps = [abs(nb.elevation - cell.elevation) for nb in neighbors]
-    max_step = float(max(steps)) if steps else 0.0
+    n_nb = len(neighbors)
+    cx, cy, cz = cell.cell_x, cell.cell_y, cell.elevation
+    max_step = 0.0
 
-    # Require at least 2 neighbors for a bivariate gradient fit
-    if len(neighbors) < 2:
-        return float("nan"), float("nan"), max_step
+    if n_nb < 2:
+        for nb in neighbors:
+            step = abs(nb.elevation - cz)
+            if step > max_step:
+                max_step = step
+        return float("nan"), float("nan"), float(max_step)
 
-    # Relative coordinates centered on current cell
-    dx = np.array([nb.cell_x - cell.cell_x for nb in neighbors], dtype=np.float64)
-    dy = np.array([nb.cell_y - cell.cell_y for nb in neighbors], dtype=np.float64)
-    dz = np.array([nb.elevation - cell.elevation for nb in neighbors], dtype=np.float64)
+    # Accumulate 2x2 normal equations: [ [sum dx^2, sum dx*dy], [sum dx*dy, sum dy^2] ]
+    s_xx = 0.0
+    s_yy = 0.0
+    s_xy = 0.0
+    s_xz = 0.0
+    s_yz = 0.0
 
-    # Design matrix: [dx, dy] to solve for gradient [a, b] where dz ~ a*dx + b*dy
-    A = np.stack([dx, dy], axis=1)
+    for nb in neighbors:
+        dx = nb.cell_x - cx
+        dy = nb.cell_y - cy
+        dz = nb.elevation - cz
+        step = abs(dz)
+        if step > max_step:
+            max_step = step
+        s_xx += dx * dx
+        s_yy += dy * dy
+        s_xy += dx * dy
+        s_xz += dx * dz
+        s_yz += dy * dz
 
-    try:
-        # Solve regularized least squares
-        grad, residuals, rank, s = np.linalg.lstsq(A, dz, rcond=None)
-        dz_dx, dz_dy = float(grad[0]), float(grad[1])
+    det = s_xx * s_yy - s_xy * s_xy
+    if det > 1e-12:
+        dz_dx = (s_yy * s_xz - s_xy * s_yz) / det
+        dz_dy = (s_xx * s_yz - s_xy * s_xz) / det
         grad_norm = math.hypot(dz_dx, dz_dy)
         slope_rad = math.atan(grad_norm)
         slope_deg = math.degrees(slope_rad)
-    except Exception:
-        return float("nan"), float("nan"), max_step
+    else:
+        slope_rad = float("nan")
+        slope_deg = float("nan")
 
-    return slope_rad, slope_deg, max_step
+    return slope_rad, slope_deg, float(max_step)
 
 
 def compute_traversability_score(
@@ -135,14 +151,15 @@ def compute_traversability_score(
     Continuous Score Formulation:
         Base semantic multiplier:
             w_sem = 1.0 for DRIVABLE_GROUND (class 0)
-            w_sem = 0.2 for NON_DRIVABLE_TERRAIN (class 1)
+            w_sem = 0.15 for NON_DRIVABLE_TERRAIN (class 1)
             w_sem = 0.0 for physical obstacles (classes 2..7)
         Geometric penalties:
-            slope_factor = max(0.0, 1.0 - slope_deg / max_slope)
-            roughness_factor = max(0.0, 1.0 - roughness / (2 * roughness_thresh))
-            step_factor = max(0.0, 1.0 - max_step / (2 * step_thresh))
+            slope_cost = slope_deg / max_slope
+            rough_cost = roughness / roughness_thresh
+            step_cost = max_step / step_thresh
+            geom_factor = max(0.0, 1.0 - (0.40*slope_cost + 0.30*rough_cost + 0.30*step_cost))
 
-        score = w_sem * (cell.confidence) * slope_factor * roughness_factor * step_factor
+        score = w_sem * (cell.confidence) * geom_factor
 
     Categorical Classification:
         - If occupancy < unknown_occupancy_min: UNKNOWN
@@ -181,29 +198,24 @@ def compute_traversability_score(
         w_sem = 0.0
 
     # 3. Geometric Factors
+    max_slope = max(config.max_drivable_slope_deg, 1e-3)
+    rough_thresh = max(config.roughness_threshold, 1e-3)
+    step_thresh = max(config.discontinuity_threshold, 1e-3)
+
     if math.isnan(slope_deg):
-        # Isolated cell without enough neighbors: assume slope penalty neutral (1.0)
-        slope_factor = 1.0
+        slope_cost = 0.0
         slope_exceeded = False
     else:
-        max_slope = max(config.max_drivable_slope_deg, 1e-3)
-        slope_factor = max(0.0, min(1.0, 1.0 - (slope_deg / max_slope)))
+        slope_cost = slope_deg / max_slope
         slope_exceeded = slope_deg > config.max_drivable_slope_deg
 
-    rough_thresh = max(config.roughness_threshold, 1e-3)
-    roughness_factor = max(0.0, min(1.0, 1.0 - (roughness / (2.0 * rough_thresh))))
+    rough_cost = roughness / rough_thresh
     roughness_exceeded = roughness > config.roughness_threshold
 
-    step_thresh = max(config.discontinuity_threshold, 1e-3)
+    step_cost = max_step / step_thresh
     step_exceeded = max_step > config.discontinuity_threshold
 
-    # Calculate continuous score [0.0, 1.0]
-    # Continuous penalty is a weighted blend of geometric costs:
-    # 40% slope, 30% roughness, 30% elevation discontinuity
-    slope_cost = (slope_deg / max_slope) if not math.isnan(slope_deg) else 0.0
-    rough_cost = roughness / rough_thresh
-    step_cost = max_step / step_thresh
-
+    # Continuous penalty weighted blend: 40% slope, 30% roughness, 30% step
     geom_penalty = min(1.0, 0.40 * slope_cost + 0.30 * rough_cost + 0.30 * step_cost)
     geom_factor = max(0.0, 1.0 - geom_penalty)
     score = w_sem * float(cell.confidence) * geom_factor
@@ -219,7 +231,7 @@ def compute_traversability_score(
     else:
         state = TraversabilityState.DRIVABLE
 
-    score = float(np.clip(score, 0.0, 1.0))
+    score = float(min(1.0, max(0.0, score)))
     return state, score
 
 
@@ -273,24 +285,24 @@ def analyze_map_terrain(
 
     result: Dict[str, Dict[Tuple[int, int], TerrainAttributes]] = {}
 
+    # 8-connected neighbor relative offsets
+    neighbor_offsets = [
+        (-1, -1), (-1, 0), (-1, 1),
+        (0, -1),           (0, 1),
+        (1, -1),  (1, 0),  (1, 1),
+    ]
+
     for level_name, level_cells in semantic_map.cells.items():
         result[level_name] = {}
         resolution = float(semantic_map.resolution_levels.get(level_name, 0.10))
 
-        # 8-connected neighbor relative offsets
-        neighbor_offsets = [
-            (-1, -1), (-1, 0), (-1, 1),
-            (0, -1),           (0, 1),
-            (1, -1),  (1, 0),  (1, 1),
-        ]
-
         for (gx, gy), cell in level_cells.items():
             # Find existing 8-connected neighbors in the same resolution level
-            neighbors = []
-            for dx, dy in neighbor_offsets:
-                nb_key = (gx + dx, gy + dy)
-                if nb_key in level_cells:
-                    neighbors.append(level_cells[nb_key])
+            neighbors = [
+                level_cells[nb_key]
+                for dx, dy in neighbor_offsets
+                if (nb_key := (gx + dx, gy + dy)) in level_cells
+            ]
 
             attrs = analyze_cell_terrain(
                 cell=cell,

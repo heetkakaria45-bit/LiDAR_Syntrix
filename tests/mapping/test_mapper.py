@@ -3,6 +3,7 @@
 Verifies:
 - Transformation from SemanticPointCloud to SemanticMap
 - Foveation preservation across all rings: near (5cm), mid_near (10cm), mid (25cm), far (50cm)
+- Direct consumption of external spatial_assignments from Manashri's module
 - Preservation of sensor pose and timestamps
 - Lightweight performance timing telemetry collection
 """
@@ -97,3 +98,62 @@ class TestSemanticElevationMapper:
         assert sem_map.timestamp == cloud.timestamp
         assert sem_map.metadata["frame_id"] == "synthetic_lidar"
         assert sem_map.sensor_pose.shape == (4, 4)
+
+    def test_external_spatial_assignments_integration(self) -> None:
+        """Verify mapper directly consumes external spatial assignments without recomputing."""
+        pts = np.array(
+            [
+                [2.0, 1.0, 0.15],
+                [2.02, 1.01, 0.17],
+                [12.0, 5.0, 0.30],
+            ],
+            dtype=np.float32,
+        )
+        classes = np.array([0, 0, 1], dtype=np.int32)
+        confidences = np.array([0.9, 0.8, 0.95], dtype=np.float32)
+
+        cloud = SemanticPointCloud(
+            points=pts,
+            semantic_class=classes,
+            confidence=confidences,
+            timestamp=500.0,
+            frame_id="external_indexing_test",
+        )
+
+        # Explicit mock of Manashri's spatial assignments format
+        custom_spatial_assignments = {
+            "near": {
+                (40, 20): (2.025, 1.025, np.array([0, 1], dtype=np.int64)),
+            },
+            "mid_near": {
+                (120, 50): (12.05, 5.05, np.array([2], dtype=np.int64)),
+            },
+            "mid": {},
+            "far": {},
+        }
+
+        # Mapper with a dummy grid indexer that would fail if called
+        class FailingIndexer:
+            def assign_points(self, points: np.ndarray):
+                raise AssertionError("Internal assign_points should not be called!")
+
+        mapper = SemanticElevationMapper(grid_indexer=FailingIndexer())
+        sem_map = mapper.map_point_cloud(cloud, spatial_assignments=custom_spatial_assignments)
+
+        assert len(sem_map.cells["near"]) == 1
+        assert len(sem_map.cells["mid_near"]) == 1
+        assert (40, 20) in sem_map.cells["near"]
+        assert (120, 50) in sem_map.cells["mid_near"]
+
+        near_cell = sem_map.cells["near"][(40, 20)]
+        assert near_cell.resolution_level == "near"
+        assert near_cell.cell_x == pytest.approx(2.025)
+        assert near_cell.cell_y == pytest.approx(1.025)
+        assert near_cell.point_count == 2
+        assert near_cell.elevation == pytest.approx(0.16)
+
+        mid_cell = sem_map.cells["mid_near"][(120, 50)]
+        assert mid_cell.resolution_level == "mid_near"
+        assert mid_cell.cell_x == pytest.approx(12.05)
+        assert mid_cell.cell_y == pytest.approx(5.05)
+        assert mid_cell.semantic_class == 1

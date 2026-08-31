@@ -49,7 +49,8 @@ class SimpleFoveatedGridAdapter:
 
     def __init__(self, config: Optional[MappingConfig] = None) -> None:
         self.config = config or MappingConfig()
-        # Default ring boundaries: level_0: 0-10m, level_1: 10-25m, level_2: 25-50m, level_3: 50-100m
+        # Default ring boundaries:
+        # near: 0-10m (5cm), mid_near: 10-25m (10cm), mid: 25-50m (25cm), far: 50-100m (50cm)
         self.rings = [
             ("near", 0.0, 10.0, self.config.foveation_resolutions.get("near", 0.05)),
             ("mid_near", 10.0, 25.0, self.config.foveation_resolutions.get("mid_near", 0.10)),
@@ -94,17 +95,21 @@ class SimpleFoveatedGridAdapter:
             gx = np.floor(px / res).astype(np.int32)
             gy = np.floor(py / res).astype(np.int32)
 
-            # Group indices by (gx, gy)
-            # Combine gx and gy into unique keys for fast bincount/unique
+            # Group indices by (gx, gy) efficiently via vectorized sorting & splitting
             keys = np.stack([gx, gy], axis=1)
-            unique_keys, inverse_idx = np.unique(keys, axis=0, return_inverse=True)
+            unique_keys, inverse_idx, counts = np.unique(
+                keys, axis=0, return_inverse=True, return_counts=True
+            )
 
-            for u_idx, (cx_idx, cy_idx) in enumerate(unique_keys):
-                cell_pts_mask = inverse_idx == u_idx
-                cell_point_indices = indices[cell_pts_mask]
+            order = np.argsort(inverse_idx, kind="stable")
+            sorted_indices = indices[order]
+            splits = np.split(sorted_indices, np.cumsum(counts)[:-1])
+
+            half_res = res / 2.0
+            for (cx_idx, cy_idx), cell_point_indices in zip(unique_keys, splits):
                 # Center coordinates in continuous space (half-cell offset)
-                center_x = float(cx_idx * res + res / 2.0)
-                center_y = float(cy_idx * res + res / 2.0)
+                center_x = float(cx_idx * res + half_res)
+                center_y = float(cy_idx * res + half_res)
                 grid_assignments[ring_name][(int(cx_idx), int(cy_idx))] = (
                     center_x,
                     center_y,
@@ -139,11 +144,17 @@ class SemanticElevationMapper:
     ) -> SemanticMap:
         """Transform a SemanticPointCloud into an aggregated 2.5D SemanticMap.
 
+        Integration Contract:
+            When `spatial_assignments` is passed (e.g. from Manashri's `src/foveated_grid/`),
+            internal grid indexing is completely bypassed with zero duplicate work.
+            The mapper directly iterates over `spatial_assignments` preserving ring levels,
+            grid keys, continuous cell centers, and point indices.
+
         Args:
             cloud: Ingested SemanticPointCloud containing points, classes, and confidences.
             sensor_pose: Optional 4x4 sensor pose transformation matrix. Defaults to Identity.
             spatial_assignments: Optional precomputed spatial assignments from src/foveated_grid/.
-                                 If None, uses self.grid_indexer.assign_points.
+                                 If None, uses fallback self.grid_indexer.assign_points.
 
         Returns:
             SemanticMap containing populated GridCell instances.
@@ -158,7 +169,7 @@ class SemanticElevationMapper:
         confidences = cloud.confidence
         timestamp = cloud.timestamp
 
-        # 1. Spatial indexing stage
+        # 1. Spatial indexing stage (only if not supplied externally)
         t_index_start = time.perf_counter()
         if spatial_assignments is None:
             spatial_assignments = self.grid_indexer.assign_points(points)
@@ -168,11 +179,14 @@ class SemanticElevationMapper:
         t_agg_start = time.perf_counter()
         cells_by_level: Dict[str, Dict[Tuple[int, int], GridCell]] = {}
         total_cells = 0
+        min_pts = self.config.min_points_per_cell
+        strategy = self.config.elevation_strategy
+        ref_points = self.config.occupancy_ref_points
 
         for level_name, cell_dict in spatial_assignments.items():
-            cells_by_level[level_name] = {}
+            level_map: Dict[Tuple[int, int], GridCell] = {}
             for (gx, gy), (cx, cy, pt_indices) in cell_dict.items():
-                if pt_indices.size < self.config.min_points_per_cell:
+                if pt_indices.size < min_pts:
                     continue
 
                 cell_z = points[pt_indices, 2]
@@ -187,13 +201,15 @@ class SemanticElevationMapper:
                     classes=cell_cls,
                     confidences=cell_conf,
                     timestamp=timestamp,
-                    strategy=self.config.elevation_strategy,
-                    ref_points=self.config.occupancy_ref_points,
+                    strategy=strategy,
+                    ref_points=ref_points,
                 )
 
                 if cell is not None:
-                    cells_by_level[level_name][(gx, gy)] = cell
+                    level_map[(gx, gy)] = cell
                     total_cells += 1
+
+            cells_by_level[level_name] = level_map
 
         t_agg = (time.perf_counter() - t_agg_start) * 1000.0
         total_time_ms = (time.perf_counter() - t0) * 1000.0
