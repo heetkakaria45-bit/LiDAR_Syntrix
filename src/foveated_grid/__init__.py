@@ -1,12 +1,22 @@
-"""Foveated Grid & Spatial Indexing Data Structure Module.
+"""Foveated Variable-Resolution Grid & Spatial Structures Module.
 
-Module Owner: Manashri
+Module Owner: Manashri (src/foveated_grid/)
 Responsibilities:
-    - Hierarchical variable-resolution multi-ring grid data structure
-    - Spatial indexing (e.g. hash grids, quadtrees, or nested polar/Cartesian rings)
-    - High-throughput point-to-cell mapping
-    - Boundary alignment and resolution transition management
-    - Memory-efficient sparse spatial representation
+    - Multi-ring hierarchical data structure
+    - Spatial indexing and deterministic coordinate conversion
+    - High-speed point-to-cell assignment
+    - Multi-resolution boundary collision handling
+    - Cache-efficient memory layouts and spatial hashing
 """
 
-__all__ = []
+from src.foveated_grid.grid_indexer import (
+    DEFAULT_RINGS,
+    FoveatedGridIndexer,
+    FoveationRing,
+)
+
+__all__ = [
+    "DEFAULT_RINGS",
+    "FoveatedGridIndexer",
+    "FoveationRing",
+]

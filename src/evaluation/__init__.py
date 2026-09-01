@@ -1,13 +1,23 @@
 """Evaluation & Benchmarking Module.
 
-Module Owner: Himisha
+Module Owner: Himisha (src/evaluation/)
 Responsibilities:
-    - Semantic segmentation metrics (IoU, mIoU, precision, recall, F1)
-    - Geometric mapping accuracy (elevation error, root mean square error)
-    - Distance-stratified evaluation (metrics binned by foveation zones)
-    - System performance profiling (FPS, latency breakdown, RAM/VRAM footprint)
-    - Comparative analysis: Uniform vs. Foveated trade-off studies
-    - Automated benchmark report generation
+    - Quantitative benchmarking: mIoU, precision, recall, elevation RMSE
+    - Distance-binned spatial error analysis
+    - Real-time pipeline latency & resource profiling
+    - Uniform vs. Foveated comparative validation studies
 """
 
-__all__ = []
+from src.evaluation.benchmark import BenchmarkRunner
+from src.evaluation.metrics import (
+    compute_distance_stratified_metrics,
+    compute_elevation_rmse,
+    compute_semantic_iou,
+)
+
+__all__ = [
+    "BenchmarkRunner",
+    "compute_distance_stratified_metrics",
+    "compute_elevation_rmse",
+    "compute_semantic_iou",
+]

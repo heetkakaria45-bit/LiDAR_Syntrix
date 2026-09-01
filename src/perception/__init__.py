@@ -1,12 +1,17 @@
-"""Point Cloud Perception & Semantic Segmentation Module.
+"""Semantic Point Cloud Perception Module.
 
-Module Owner: Vedant
+Module Owner: Vedant (src/perception/)
 Responsibilities:
-    - Point cloud semantic segmentation architectures
-    - Model training, checkpoints, and inference pipelines
-    - Per-point semantic class prediction and probability distributions
-    - Prediction confidence score estimation
-    - Model optimization (quantization, pruning, ONNX runtime export)
+    - 3D point cloud semantic segmentation
+    - Point-wise semantic class prediction (0..7) and confidence estimation
+    - Model compression, ONNX runtime, and inference acceleration
+    - Class probability distribution generation
 """
 
-__all__ = []
+from src.perception.base import BaseSemanticSegmenter
+from src.perception.mock import MockSemanticSegmenter
+
+__all__ = [
+    "BaseSemanticSegmenter",
+    "MockSemanticSegmenter",
+]
