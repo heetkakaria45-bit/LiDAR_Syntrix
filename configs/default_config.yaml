@@ -158,11 +158,18 @@ preprocessing:
     max_range: 100.0
   outlier_removal:
     enabled: true
+    radius: 1.0
+    min_neighbors: 1
     nb_neighbors: 20
     std_ratio: 2.0
   voxel_downsample:
-    enabled: false
-    leaf_size: 0.02
+    enabled: true
+    voxel_size: 0.05
+    leaf_size: 0.05
+  ground_filter:
+    enabled: true
+    height_threshold: 0.20
+    sensor_height: 1.73
 
 # Perception configuration (Owner: Vedant)
 perception:

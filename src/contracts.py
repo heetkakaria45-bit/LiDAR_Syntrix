@@ -23,6 +23,70 @@ import numpy as np
 
 
 @dataclass
+class PreprocessingStats:
+    """Quantitative execution statistics for the point cloud preprocessing pipeline."""
+
+    raw_points: int
+    range_filtered_points: int
+    outlier_filtered_points: int
+    voxel_downsampled_points: int
+    ground_points: int
+    non_ground_points: int
+    processing_time_ms: float
+    reduction_percentage: float
+
+
+@dataclass
+class PreprocessedPointCloud:
+    """Preprocessed and validated LiDAR frame with ground/non-ground separation.
+
+    Produced by: src/preprocessing/ (Owner: Amulya)
+    Consumed by: src/perception/ and downstream mapping
+    """
+
+    points: np.ndarray  # Shape: (N, 3), dtype: float32
+    ground_mask: np.ndarray  # Shape: (N,), dtype: bool (True=Ground, False=Non-Ground)
+    timestamp: float
+    frame_id: str
+    stats: PreprocessingStats
+    intensity: Optional[np.ndarray] = None  # Shape: (N,), dtype: float32
+    sensor_pose: np.ndarray = field(
+        default_factory=lambda: np.eye(4, dtype=np.float64)
+    )
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.points, np.ndarray):
+            self.points = np.asarray(self.points, dtype=np.float32)
+        if not isinstance(self.ground_mask, np.ndarray):
+            self.ground_mask = np.asarray(self.ground_mask, dtype=bool)
+
+        num_points = self.points.shape[0]
+        if self.points.ndim != 2 or self.points.shape[1] != 3:
+            raise ValueError(f"points must have shape (N, 3), got {self.points.shape}")
+        if self.ground_mask.shape != (num_points,):
+            raise ValueError(
+                f"ground_mask shape {self.ground_mask.shape} does not match N={num_points}"
+            )
+        if self.intensity is not None:
+            if not isinstance(self.intensity, np.ndarray):
+                self.intensity = np.asarray(self.intensity, dtype=np.float32)
+            if self.intensity.shape != (num_points,):
+                raise ValueError(
+                    f"intensity shape {self.intensity.shape} does not match N={num_points}"
+                )
+
+    @property
+    def ground_points(self) -> np.ndarray:
+        """Slice of points classified as ground."""
+        return self.points[self.ground_mask]
+
+    @property
+    def non_ground_points(self) -> np.ndarray:
+        """Slice of points classified as non-ground / obstacles."""
+        return self.points[~self.ground_mask]
+
+
+@dataclass
 class PointCloudFrame:
     """Standardized ingested raw or filtered LiDAR frame.
 

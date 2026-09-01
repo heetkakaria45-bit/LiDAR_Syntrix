@@ -1,15 +1,29 @@
-"""LiDAR Preprocessing & Dataset Pipeline Module.
+"""LiDAR Preprocessing & Point Cloud Quality Pipeline Module.
 
 Module Owner: Amulya
 Responsibilities:
     - Dataset loading and point cloud ingestion
-    - Outlier filtering and noise removal
-    - Downsampling / voxel grid decimation
-    - Coordinate transformations (sensor to base/map frames)
-    - Standardized PointCloudFrame generation complying with CONTRACTS.md
-    - Synthetic geometric test scene generation for deterministic testing
+    - Radial range filtering [min_range, max_range]
+    - Fast spatial-hash outlier / noise removal
+    - Voxel grid downsampling
+    - Ground / non-ground geometric separation
+    - Standardized PointCloudFrame and PreprocessedPointCloud generation
 """
 
+from src.preprocessing.filters import (
+    GroundFilter,
+    OutlierFilter,
+    RangeFilter,
+    VoxelDownsampler,
+)
+from src.preprocessing.pipeline import PreprocessingPipeline
 from src.preprocessing.synthetic import generate_synthetic_scene
 
-__all__ = ["generate_synthetic_scene"]
+__all__ = [
+    "GroundFilter",
+    "OutlierFilter",
+    "PreprocessingPipeline",
+    "RangeFilter",
+    "VoxelDownsampler",
+    "generate_synthetic_scene",
+]
