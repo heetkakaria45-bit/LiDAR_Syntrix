@@ -1,223 +1,221 @@
-"""LiDAR Preprocessing Pipeline Orchestrator & Telemetry.
+"""LiDAR Point Cloud Preprocessing Pipeline.
 
-Module Owner: Amulya (Preprocessing)
-
-Provides:
-    - PreprocessingConfig: Typed configuration data class
-    - PreprocessingMetrics: Runtime performance instrumentation (points, latency, reduction)
-    - LiDARPreprocessor: Pipeline class executing validation, filtering, downsampling,
-      outlier removal, and coordinate transformation
-    - preprocess_frame: Functional entry point for simple one-line handoff
+Module Owner: Amulya
+Responsibilities:
+    - PointCloudFrame validation and sanity checks
+    - Executing RangeFilter -> OutlierFilter -> VoxelDownsampler -> GroundFilter
+    - Producing standardized PreprocessedPointCloud and PreprocessingStats contracts
+    - Invariant enforcement: output <= input, ground + non_ground == output
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from pathlib import Path
 import time
-from typing import Any, Dict, Optional, Tuple, Union
+from pathlib import Path
+from typing import Any, Dict, Optional, Union
+
 import numpy as np
 import yaml
 
-from src.contracts import PointCloudFrame
-from src.preprocessing.filters import (
-    filter_by_range,
-    remove_outliers_statistical,
-    transform_coordinates,
-    validate_and_sanitize_points,
-    voxel_downsample,
-)
+from src.contracts import PointCloudFrame, PreprocessedPointCloud, PreprocessingStats
+from src.preprocessing.filters import GroundFilter, OutlierFilter, RangeFilter, VoxelDownsampler
 
 
-@dataclass
-class PreprocessingConfig:
-    """Configuration parameters for the LiDAR preprocessing pipeline.
+class PreprocessingPipeline:
+    """End-to-End LiDAR Preprocessing & Point Cloud Quality Pipeline."""
 
-    Attributes:
-        min_range: Minimum Euclidean distance in meters (default: 0.5m).
-        max_range: Maximum Euclidean distance in meters (default: 100.0m).
-        range_filter_enabled: Whether to apply range filtering.
-        voxel_downsample_enabled: Whether to apply voxel grid downsampling.
-        voxel_leaf_size: Voxel cube edge length in meters.
-        outlier_removal_enabled: Whether to apply statistical outlier removal.
-        outlier_nb_neighbors: k-nearest neighbors for outlier estimation.
-        outlier_std_ratio: Standard deviation multiplier threshold.
-        coordinate_transform: Optional 4x4 matrix for sensor-to-base transformation.
-    """
+    def __init__(
+        self,
+        config: Optional[Union[Dict[str, Any], Path, str]] = None,
+        range_filter: Optional[RangeFilter] = None,
+        outlier_filter: Optional[OutlierFilter] = None,
+        voxel_downsampler: Optional[VoxelDownsampler] = None,
+        ground_filter: Optional[GroundFilter] = None,
+    ) -> None:
+        """Initialize pipeline from configuration dict/file or explicit filter instances."""
+        cfg_dict: Optional[Dict[str, Any]] = None
+        if config is not None:
+            cfg_dict = self._load_config(config)
+        else:
+            try:
+                root_cfg = Path(__file__).resolve().parent.parent.parent / "configs" / "default_config.yaml"
+                if root_cfg.is_file():
+                    with open(root_cfg, "r", encoding="utf-8") as f:
+                        cfg_dict = yaml.safe_load(f)
+            except Exception:
+                cfg_dict = None
 
-    min_range: float = 0.5
-    max_range: float = 100.0
-    range_filter_enabled: bool = True
-    voxel_downsample_enabled: bool = False
-    voxel_leaf_size: float = 0.05
-    outlier_removal_enabled: bool = False
-    outlier_nb_neighbors: int = 20
-    outlier_std_ratio: float = 2.0
-    coordinate_transform: Optional[np.ndarray] = None
+        if cfg_dict and "preprocessing" in cfg_dict:
+            p_cfg = cfg_dict["preprocessing"]
 
-    @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> PreprocessingConfig:
-        """Create configuration from dictionary (e.g. parsed YAML)."""
-        prep = d.get("preprocessing", d)
-        range_cfg = prep.get("range_filter", {})
-        outlier_cfg = prep.get("outlier_removal", {})
-        voxel_cfg = prep.get("voxel_downsample", {})
+            # Range Filter
+            rf_cfg = p_cfg.get("range_filter", {})
+            self.range_filter = range_filter or RangeFilter(
+                min_range=float(rf_cfg.get("min_range", 0.5)),
+                max_range=float(rf_cfg.get("max_range", 100.0)),
+            )
 
-        return cls(
-            min_range=float(range_cfg.get("min_range", 0.5)),
-            max_range=float(range_cfg.get("max_range", 100.0)),
-            range_filter_enabled=bool(range_cfg.get("enabled", True)),
-            voxel_downsample_enabled=bool(voxel_cfg.get("enabled", False)),
-            voxel_leaf_size=float(voxel_cfg.get("leaf_size", 0.05)),
-            outlier_removal_enabled=bool(outlier_cfg.get("enabled", False)),
-            outlier_nb_neighbors=int(outlier_cfg.get("nb_neighbors", 20)),
-            outlier_std_ratio=float(outlier_cfg.get("std_ratio", 2.0)),
-        )
+            # Outlier Filter
+            of_cfg = p_cfg.get("outlier_removal", {})
+            self.outlier_filter = outlier_filter or OutlierFilter(
+                enabled=bool(of_cfg.get("enabled", True)),
+                radius=float(of_cfg.get("radius", 1.0)),
+                min_neighbors=int(of_cfg.get("min_neighbors", 1)),
+            )
 
-    @classmethod
-    def from_yaml(cls, path: Union[str, Path]) -> PreprocessingConfig:
-        """Load configuration from a YAML file."""
-        with open(path, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f)
-        return cls.from_dict(data)
+            # Voxel Downsampler
+            vd_cfg = p_cfg.get("voxel_downsample", {})
+            self.voxel_downsampler = voxel_downsampler or VoxelDownsampler(
+                enabled=bool(vd_cfg.get("enabled", True)),
+                voxel_size=float(vd_cfg.get("voxel_size", vd_cfg.get("leaf_size", 0.05))),
+            )
 
+            # Ground Filter
+            gf_cfg = p_cfg.get("ground_filter", {})
+            self.ground_filter = ground_filter or GroundFilter(
+                enabled=bool(gf_cfg.get("enabled", True)),
+                height_threshold=float(gf_cfg.get("height_threshold", 0.20)),
+            )
+        else:
+            self.range_filter = range_filter or RangeFilter(min_range=0.5, max_range=100.0)
+            self.outlier_filter = outlier_filter or OutlierFilter(enabled=True, radius=1.0, min_neighbors=1)
+            self.voxel_downsampler = voxel_downsampler or VoxelDownsampler(enabled=True, voxel_size=0.05)
+            self.ground_filter = ground_filter or GroundFilter(enabled=True, height_threshold=0.20)
 
-@dataclass
-class PreprocessingMetrics:
-    """Runtime execution metrics collected during preprocessing.
+    def _load_config(self, config_source: Union[Dict[str, Any], Path, str]) -> Dict[str, Any]:
+        """Load configuration dictionary from dict or YAML file."""
+        if isinstance(config_source, dict):
+            return config_source
+        p = Path(config_source)
+        if not p.is_file():
+            # Try finding configs/default_config.yaml relative to project root
+            root_cfg = Path(__file__).resolve().parent.parent.parent / "configs" / "default_config.yaml"
+            if root_cfg.is_file():
+                p = root_cfg
+            else:
+                raise FileNotFoundError(f"Configuration file not found at {config_source}")
+        with open(p, "r", encoding="utf-8") as f:
+            return yaml.safe_load(f)
 
-    All metrics are measured from actual execution.
+    def process(
+        self,
+        frame_or_points: Union[PointCloudFrame, np.ndarray],
+        intensity: Optional[np.ndarray] = None,
+        frame_id: str = "frame_0000",
+        timestamp: Optional[float] = None,
+    ) -> PreprocessedPointCloud:
+        """Execute full preprocessing pipeline on a raw LiDAR frame.
 
-    Attributes:
-        input_points: Number of points before preprocessing.
-        output_points: Number of points after preprocessing.
-        latency_ms: Preprocessing elapsed wall-clock time in milliseconds.
-        reduction_ratio: Fraction of points removed, (input - output) / input.
-                         Equals 0.0 when input_points is 0.
-        downsample_ratio: output_points / input_points (retention factor).
-    """
-
-    input_points: int
-    output_points: int
-    latency_ms: float
-    reduction_ratio: float
-    downsample_ratio: float
-
-
-class LiDARPreprocessor:
-    """Production entry point for LiDAR point cloud preprocessing.
-
-    Orchestrates:
-        1. Validation & sanitization (removes NaN/Inf coordinates)
-        2. Euclidean range filtering (clips to [min_range, max_range])
-        3. Optional statistical outlier removal
-        4. Optional voxel grid downsampling
-        5. Coordinate normalization (sensor to vehicle base frame)
-        6. Standardized PointCloudFrame creation complying with CONTRACTS.md
-    """
-
-    def __init__(self, config: Optional[PreprocessingConfig] = None) -> None:
-        self.config = config if config is not None else PreprocessingConfig()
-
-    @classmethod
-    def from_config_file(cls, config_path: Union[str, Path]) -> LiDARPreprocessor:
-        """Instantiate preprocessor from project configuration file."""
-        cfg = PreprocessingConfig.from_yaml(config_path)
-        return cls(config=cfg)
-
-    def preprocess(
-        self, frame: PointCloudFrame
-    ) -> Tuple[PointCloudFrame, PreprocessingMetrics]:
-        """Execute the full preprocessing pipeline on an input PointCloudFrame.
+        Pipeline Stages:
+            1. Input Validation & NaN/Inf Sanitization
+            2. Radial Range Filtering [min_range, max_range]
+            3. Outlier / Isolated Noise Removal
+            4. Voxel Grid Downsampling
+            5. Geometric Ground / Non-Ground Separation
 
         Args:
-            frame: Input PointCloudFrame instance.
+            frame_or_points: PointCloudFrame dataclass or (N, 3) numpy array.
+            intensity: Optional (N,) intensity array (if passing numpy array).
+            frame_id: Frame identifier string.
+            timestamp: Timestamp in seconds.
 
         Returns:
-            processed_frame: Standardized PointCloudFrame ready for downstream perception.
-            metrics: Actual measured execution telemetry.
+            PreprocessedPointCloud contract with complete PreprocessingStats.
         """
         start_time = time.perf_counter()
 
-        raw_points = frame.points
-        raw_intensity = frame.intensity
-        input_count = raw_points.shape[0]
+        # 1. Unpack & Validate Input
+        if isinstance(frame_or_points, PointCloudFrame):
+            raw_pts = frame_or_points.points
+            raw_int = frame_or_points.intensity
+            f_id = frame_or_points.frame_id
+            t_stamp = frame_or_points.timestamp
+            sensor_pose = frame_or_points.sensor_pose
+        else:
+            raw_pts = np.asarray(frame_or_points, dtype=np.float32)
+            raw_int = np.asarray(intensity, dtype=np.float32) if intensity is not None else None
+            f_id = frame_id
+            t_stamp = timestamp if timestamp is not None else time.time()
+            sensor_pose = np.eye(4, dtype=np.float64)
 
-        # Stage 1: Validation & Sanitization (drop NaN, Inf)
-        pts, intensity = validate_and_sanitize_points(raw_points, raw_intensity)
+        if raw_pts.ndim != 2 or raw_pts.shape[1] != 3:
+            raise ValueError(f"points must have shape (N, 3), got {raw_pts.shape}")
 
-        # Stage 2: Euclidean Range Filtering
-        if self.config.range_filter_enabled and pts.shape[0] > 0:
-            pts, intensity = filter_by_range(
-                pts,
-                intensity,
-                min_range=self.config.min_range,
-                max_range=self.config.max_range,
+        raw_count = len(raw_pts)
+
+        # Handle empty point cloud gracefully
+        if raw_count == 0:
+            stats = PreprocessingStats(
+                raw_points=0,
+                range_filtered_points=0,
+                outlier_filtered_points=0,
+                voxel_downsampled_points=0,
+                ground_points=0,
+                non_ground_points=0,
+                processing_time_ms=(time.perf_counter() - start_time) * 1000.0,
+                reduction_percentage=0.0,
+            )
+            return PreprocessedPointCloud(
+                points=np.empty((0, 3), dtype=np.float32),
+                ground_mask=np.empty((0,), dtype=bool),
+                timestamp=t_stamp,
+                frame_id=f_id,
+                stats=stats,
+                intensity=None,
+                sensor_pose=sensor_pose,
             )
 
-        # Stage 3: Optional Outlier Removal
-        if self.config.outlier_removal_enabled and pts.shape[0] > 0:
-            pts, intensity = remove_outliers_statistical(
-                pts,
-                intensity,
-                nb_neighbors=self.config.outlier_nb_neighbors,
-                std_ratio=self.config.outlier_std_ratio,
-            )
+        # Sanitize non-finite values (NaN / Inf)
+        finite_mask = np.all(np.isfinite(raw_pts), axis=1)
+        valid_pts = raw_pts[finite_mask]
+        valid_int = raw_int[finite_mask] if raw_int is not None else None
 
-        # Stage 4: Optional Voxel Downsampling
-        if self.config.voxel_downsample_enabled and pts.shape[0] > 0:
-            pts, intensity = voxel_downsample(
-                pts,
-                intensity,
-                leaf_size=self.config.voxel_leaf_size,
-            )
+        # 2. Range Filtering
+        range_pts, range_int, _ = self.range_filter.filter(valid_pts, valid_int)
+        range_count = len(range_pts)
 
-        # Stage 5: Coordinate Normalization / Transformation
-        if self.config.coordinate_transform is not None and pts.shape[0] > 0:
-            pts = transform_coordinates(pts, self.config.coordinate_transform)
+        # 3. Outlier Removal
+        outlier_pts, outlier_int, _ = self.outlier_filter.filter(range_pts, range_int)
+        outlier_count = len(outlier_pts)
+
+        # 4. Voxel Downsampling
+        voxel_pts, voxel_int, _ = self.voxel_downsampler.filter(outlier_pts, outlier_int)
+        voxel_count = len(voxel_pts)
+
+        # 5. Ground / Non-Ground Separation
+        ground_pts, non_ground_pts, ground_mask = self.ground_filter.filter(voxel_pts, voxel_int)
+        ground_count = len(ground_pts)
+        non_ground_count = len(non_ground_pts)
+
+        # Invariant Verification: ground + non_ground == voxel_count
+        assert ground_count + non_ground_count == voxel_count, (
+            f"Invariant violation: ground ({ground_count}) + non_ground ({non_ground_count}) "
+            f"!= total processed ({voxel_count})"
+        )
+        assert voxel_count <= raw_count, (
+            f"Invariant violation: output ({voxel_count}) > input ({raw_count})"
+        )
 
         elapsed_ms = (time.perf_counter() - start_time) * 1000.0
-        output_count = pts.shape[0]
+        reduction_pct = 100.0 * (1.0 - (voxel_count / max(1, raw_count)))
 
-        if input_count > 0:
-            reduction_ratio = float((input_count - output_count) / input_count)
-            downsample_ratio = float(output_count / input_count)
-        else:
-            reduction_ratio = 0.0
-            downsample_ratio = 1.0
-
-        metrics = PreprocessingMetrics(
-            input_points=input_count,
-            output_points=output_count,
-            latency_ms=elapsed_ms,
-            reduction_ratio=reduction_ratio,
-            downsample_ratio=downsample_ratio,
+        stats = PreprocessingStats(
+            raw_points=raw_count,
+            range_filtered_points=range_count,
+            outlier_filtered_points=outlier_count,
+            voxel_downsampled_points=voxel_count,
+            ground_points=ground_count,
+            non_ground_points=non_ground_count,
+            processing_time_ms=elapsed_ms,
+            reduction_percentage=reduction_pct,
         )
 
-        processed_frame = PointCloudFrame(
-            points=pts,
-            intensity=intensity,
-            timestamp=frame.timestamp,
-            frame_id=frame.frame_id,
-            sensor_pose=frame.sensor_pose,
+        return PreprocessedPointCloud(
+            points=voxel_pts,
+            ground_mask=ground_mask,
+            timestamp=t_stamp,
+            frame_id=f_id,
+            stats=stats,
+            intensity=voxel_int,
+            sensor_pose=sensor_pose,
         )
-
-        return processed_frame, metrics
-
-
-def preprocess_frame(
-    frame: PointCloudFrame,
-    config: Optional[PreprocessingConfig] = None,
-) -> PointCloudFrame:
-    """Convenience function to preprocess a PointCloudFrame in a single call.
-
-    Args:
-        frame: Input PointCloudFrame.
-        config: Optional custom PreprocessingConfig. If omitted, uses default config.
-
-    Returns:
-        processed_frame: Standardized PointCloudFrame.
-    """
-    preprocessor = LiDARPreprocessor(config=config)
-    processed_frame, _ = preprocessor.preprocess(frame)
-    return processed_frame

@@ -1,18 +1,8 @@
-"""Foveated Grid & Spatial Indexing Data Structure Module.
-
-Module Owner: Manashri
-Responsibilities:
-    - Hierarchical variable-resolution multi-ring grid data structure
-    - Spatial indexing (nested multi-resolution Cartesian rings with sparse hashing)
-    - High-throughput scalar and vectorized batch point-to-cell mapping
-    - Boundary alignment and resolution transition management
-    - Memory-efficient sparse spatial representation
-    - Downstream integration with 2.5D Semantic Mapping engine
-"""
+﻿"""Foveated Variable-Resolution Grid & Spatial Structures Module."""
 
 from src.foveated_grid.foveated_indexer import (
     CellKey,
-    FoveatedGridIndexer,
+    FoveatedGridIndexer as LegacyFoveatedGridIndexer,
     FoveationLevelConfig,
     cell_to_world,
     load_foveation_config,
@@ -25,11 +15,16 @@ from src.foveated_grid.sparse_grid import (
     SparseFoveatedGrid,
     ingest_point_cloud,
 )
+from src.foveated_grid.grid_indexer import (
+    DEFAULT_RINGS,
+    FoveatedGridIndexer,
+    FoveationRing,
+)
 
 __all__ = [
     "CellKey",
     "FoveationLevelConfig",
-    "FoveatedGridIndexer",
+    "LegacyFoveatedGridIndexer",
     "SparseCell",
     "SparseFoveatedGrid",
     "BatchInsertResult",
@@ -38,4 +33,7 @@ __all__ = [
     "resolution_for_distance",
     "world_to_cell",
     "cell_to_world",
+    "DEFAULT_RINGS",
+    "FoveatedGridIndexer",
+    "FoveationRing",
 ]

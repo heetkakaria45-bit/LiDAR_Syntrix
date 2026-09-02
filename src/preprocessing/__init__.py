@@ -1,56 +1,29 @@
-"""LiDAR Preprocessing & Dataset Pipeline Module.
+"""LiDAR Preprocessing & Point Cloud Quality Pipeline Module.
 
-Module Owner: Amulya (Member 2)
-
+Module Owner: Amulya
 Responsibilities:
-    - Dataset loading and point cloud ingestion (KITTI / SemanticKITTI binary, raw arrays)
-    - Non-finite (NaN, Inf) point validation and sanitization
-    - Euclidean range filtering with exact boundaries
+    - Dataset loading and point cloud ingestion
+    - Radial range filtering [min_range, max_range]
+    - Fast spatial-hash outlier / noise removal
     - Voxel grid downsampling
-    - Optional outlier removal (statistical and radius)
-    - Coordinate transformations (sensor to ego base frame)
-    - Standardized PointCloudFrame generation complying with CONTRACTS.md
-    - Synthetic geometric test scene generation for deterministic testing
+    - Ground / non-ground geometric separation
+    - Standardized PointCloudFrame and PreprocessedPointCloud generation
 """
 
 from src.preprocessing.filters import (
-    filter_by_range,
-    remove_outliers_radius,
-    remove_outliers_statistical,
-    transform_coordinates,
-    validate_and_sanitize_points,
-    voxel_downsample,
+    GroundFilter,
+    OutlierFilter,
+    RangeFilter,
+    VoxelDownsampler,
 )
-from src.preprocessing.loaders import (
-    load_kitti_bin,
-    load_raw_points,
-)
-from src.preprocessing.pipeline import (
-    LiDARPreprocessor,
-    PreprocessingConfig,
-    PreprocessingMetrics,
-    preprocess_frame,
-)
-from src.preprocessing.synthetic import (
-    generate_synthetic_scene,
-)
+from src.preprocessing.pipeline import PreprocessingPipeline
+from src.preprocessing.synthetic import generate_synthetic_scene
 
 __all__ = [
-    # Main Pipeline & Telemetry
-    "LiDARPreprocessor",
-    "PreprocessingConfig",
-    "PreprocessingMetrics",
-    "preprocess_frame",
-    # Loaders & Ingestion
-    "load_kitti_bin",
-    "load_raw_points",
-    # Filtering & Transform Utilities
-    "validate_and_sanitize_points",
-    "filter_by_range",
-    "voxel_downsample",
-    "remove_outliers_statistical",
-    "remove_outliers_radius",
-    "transform_coordinates",
-    # Synthetic Generation (preserves existing exports)
+    "GroundFilter",
+    "OutlierFilter",
+    "PreprocessingPipeline",
+    "RangeFilter",
+    "VoxelDownsampler",
     "generate_synthetic_scene",
 ]
