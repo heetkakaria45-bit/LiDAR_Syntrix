@@ -250,7 +250,7 @@ export const LidarViewport: React.FC<LidarViewportProps> = ({
             pointCount: 168,
             resolution: '5cm (Refined Zone 0)',
             distance: Number(dist.toFixed(1)),
-            provenance: 'SYNTHETIC BENCHMARK SPLIT',
+            provenance: 'SYNTHETIC BENCHMARK SPLIT • SIH 2026',
           };
           setSelectedAnomaly(anomalyData);
           highlightSelectedAnomaly(anomalyData);
@@ -291,7 +291,7 @@ export const LidarViewport: React.FC<LidarViewportProps> = ({
             pointCount: 220,
             resolution: '5cm (Refined Zone 0)',
             distance: Number(dist.toFixed(1)),
-            provenance: 'SYNTHETIC BENCHMARK SPLIT',
+            provenance: 'SYNTHETIC BENCHMARK SPLIT • SIH 2026',
           };
           setSelectedAnomaly(anomalyData);
           highlightSelectedAnomaly(anomalyData);

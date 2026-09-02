@@ -78,7 +78,7 @@ export const HomePage: React.FC<HomePageProps> = ({
     },
     {
       id: 'efficiency',
-      title: 'Benchmark Efficiency',
+      title: 'SIH Benchmarked Efficiency',
       tag: 'Real-Time Robotics',
       icon: <Activity className="w-5 h-5 text-amber-400" />,
       color: '#f59e0b',
@@ -94,7 +94,7 @@ export const HomePage: React.FC<HomePageProps> = ({
       {/* 1. PROJECT TAGLINE PILL */}
       <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-slate-900/90 border border-hud-cyan/40 text-xs font-mono text-slate-200 shadow-cyan-glow-sm">
         <span className="w-2.5 h-2.5 rounded-full bg-hud-emerald animate-pulse" />
-        <span className="text-hud-cyan font-bold tracking-wide">AUTONOMOUS PERCEPTION • 2026</span>
+        <span className="text-hud-cyan font-bold tracking-wide">SMART INDIA HACKATHON 2026</span>
         <span className="text-slate-600">|</span>
         <span className="text-slate-300">DEFENCE ROBOTICS &amp; 3D AUTONOMOUS PERCEPTION</span>
       </div>

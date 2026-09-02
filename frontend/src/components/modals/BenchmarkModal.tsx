@@ -47,7 +47,7 @@ export const BenchmarkModal: React.FC<BenchmarkModalProps> = ({ isOpen, onClose 
             </div>
             <div>
               <h2 className="text-lg font-bold font-display text-white">
-                Scientific Benchmarks &amp; Comparative Study
+                SIH 2026 Scientific Benchmarks &amp; Comparative Study
               </h2>
               <p className="text-xs font-mono text-slate-400">
                 Quantitative Evaluation: Standard Uniform 3D/2D Grid vs. Adaptive Foveated 2.5D Mapping

@@ -146,7 +146,7 @@ export const RightStatsPanel: React.FC<RightStatsPanelProps> = ({
           title="Consolidated Overview: Stats & Performance Graphs"
         >
           <Activity className="w-3.5 h-3.5" />
-          <span>SYSTEM DASHBOARD</span>
+          <span>SIH DASHBOARD</span>
         </button>
 
         <button

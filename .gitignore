@@ -86,11 +86,6 @@ yarn-error.log*
 frontend/dist/
 frontend/.vite/
 
-# Large media files (served locally or generated)
-*.mp4
-*.avi
-*.mov
-
 # Local environment & secret overrides
 .env
 .env.local

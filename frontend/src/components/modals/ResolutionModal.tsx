@@ -91,7 +91,7 @@ export const ResolutionModal: React.FC<ResolutionModalProps> = ({
                   Adaptive Foveated Spatial Resolution Architecture
                 </h2>
                 <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-hud-emerald/20 text-hud-emerald border border-hud-emerald/40">
-                  DEFENCE
+                  SIH 2026 DEFENCE
                 </span>
               </div>
               <p className="text-xs font-mono text-slate-400">

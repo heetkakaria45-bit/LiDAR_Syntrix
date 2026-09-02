@@ -87,7 +87,7 @@ export const Header: React.FC<HeaderProps> = ({
             </span>
           </div>
           <p className="text-[10.5px] font-mono text-slate-400 leading-none mt-1">
-            Defence Autonomous Perception
+            Smart India Hackathon 2026 • Defence Autonomous Perception
           </p>
         </div>
       </div>
