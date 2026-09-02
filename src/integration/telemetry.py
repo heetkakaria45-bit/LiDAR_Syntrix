@@ -100,6 +100,49 @@ class TelemetryProfiler:
             except Exception:
                 pass
 
+        if sys.platform == "win32":
+            try:
+                import ctypes
+                from ctypes import wintypes
+
+                class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
+                    _fields_ = [
+                        ("cb", wintypes.DWORD),
+                        ("PageFaultCount", wintypes.DWORD),
+                        ("PeakWorkingSetSize", ctypes.c_size_t),
+                        ("WorkingSetSize", ctypes.c_size_t),
+                        ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                        ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                        ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                        ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                        ("PagefileUsage", ctypes.c_size_t),
+                        ("PeakPagefileUsage", ctypes.c_size_t),
+                    ]
+
+                GetProcessMemoryInfo = ctypes.windll.psapi.GetProcessMemoryInfo
+                GetProcessMemoryInfo.argtypes = [
+                    wintypes.HANDLE,
+                    ctypes.POINTER(PROCESS_MEMORY_COUNTERS),
+                    wintypes.DWORD,
+                ]
+                GetProcessMemoryInfo.restype = wintypes.BOOL
+
+                GetCurrentProcess = ctypes.windll.kernel32.GetCurrentProcess
+                GetCurrentProcess.restype = wintypes.HANDLE
+
+                process = GetCurrentProcess()
+                counters = PROCESS_MEMORY_COUNTERS()
+                counters.cb = ctypes.sizeof(PROCESS_MEMORY_COUNTERS)
+                if GetProcessMemoryInfo(process, ctypes.byref(counters), counters.cb):
+                    rss_mb = counters.WorkingSetSize / (1024 * 1024)
+                    vms_mb = counters.PagefileUsage / (1024 * 1024)
+                    return {
+                        "ram_rss_mb": round(rss_mb, 2),
+                        "ram_vms_mb": round(vms_mb, 2),
+                    }
+            except Exception:
+                pass
+
         return {"ram_rss_mb": 0.0, "ram_vms_mb": 0.0}
 
     def get_telemetry_snapshot(
