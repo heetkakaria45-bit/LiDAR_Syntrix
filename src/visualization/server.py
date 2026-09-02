@@ -38,7 +38,28 @@ WEB_DIR = Path(__file__).parent / "web"
 
 
 def _find_video_asset() -> Optional[Path]:
-    """Find any mp4 or webm video asset in project root."""
+    """Find canonical background video asset, prioritizing Generated Video September 01, 2026."""
+    # 1. Primary: Generated Video September 01, 2026
+    gen_video = PROJECT_ROOT / "Generated Video September 01, 2026 - 11_23PM.mp4"
+    if gen_video.exists():
+        return gen_video
+
+    # 2. Secondary: bg_video.mp4 in web or frontend/public
+    web_bg = WEB_DIR / "bg_video.mp4"
+    if web_bg.exists():
+        return web_bg
+
+    fe_bg = PROJECT_ROOT / "frontend" / "public" / "bg_video.mp4"
+    if fe_bg.exists():
+        return fe_bg
+
+    # 3. Any non-car mp4 in project root
+    for ext in ("*.mp4", "*.webm"):
+        for match in PROJECT_ROOT.glob(ext):
+            if "car" not in match.name.lower():
+                return match
+
+    # 4. Fallback to any video asset
     for ext in ("*.mp4", "*.webm"):
         matches = list(PROJECT_ROOT.glob(ext))
         if matches:
