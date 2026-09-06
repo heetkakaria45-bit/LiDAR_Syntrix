@@ -80,3 +80,47 @@ def test_load_raw_points() -> None:
     assert frame.intensity is not None and frame.intensity.shape == (2,)
     assert frame.frame_id == "custom_lidar"
     assert frame.timestamp == 50.0
+
+
+def test_load_kitti_bin_with_nan_inf_sanitization(tmp_path: Path) -> None:
+    """Test that load_kitti_bin with sanitize=True removes NaN and Inf rows from binary files."""
+    bin_file = tmp_path / "corrupted_points.bin"
+    # Create 5 points: valid, NaN in x, Inf in y, NaN in intensity, valid
+    raw = np.array(
+        [
+            [1.0, 2.0, 3.0, 0.5],
+            [np.nan, 2.0, 3.0, 0.6],
+            [4.0, np.inf, 6.0, 0.7],
+            [7.0, 8.0, 9.0, np.nan],
+            [10.0, 11.0, 12.0, 0.9],
+        ],
+        dtype=np.float32,
+    )
+    raw.tofile(bin_file)
+
+    frame = load_kitti_bin(bin_file, sanitize=True)
+
+    assert isinstance(frame, PointCloudFrame)
+    assert frame.points.shape == (2, 3)
+    assert frame.intensity is not None and frame.intensity.shape == (2,)
+    np.testing.assert_allclose(frame.points[0], [1.0, 2.0, 3.0])
+    np.testing.assert_allclose(frame.points[1], [10.0, 11.0, 12.0])
+    np.testing.assert_allclose(frame.intensity, [0.5, 0.9])
+    assert frame.points.dtype == np.float32
+    assert frame.intensity.dtype == np.float32
+
+
+def test_load_raw_points_float64_conversion() -> None:
+    """Test that load_raw_points properly ensures float32 dtype with and without sanitization."""
+    pts_f64 = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], dtype=np.float64)
+    int_f64 = np.array([0.1, 0.9], dtype=np.float64)
+
+    # sanitize=True
+    frame_san = load_raw_points(pts_f64, int_f64, sanitize=True)
+    assert frame_san.points.dtype == np.float32
+    assert frame_san.intensity is not None and frame_san.intensity.dtype == np.float32
+
+    # sanitize=False
+    frame_nosan = load_raw_points(pts_f64, int_f64, sanitize=False)
+    assert frame_nosan.points.dtype == np.float32
+    assert frame_nosan.intensity is not None and frame_nosan.intensity.dtype == np.float32

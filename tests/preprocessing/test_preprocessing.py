@@ -362,3 +362,169 @@ def test_outlier_removal_statistical_and_radius() -> None:
     # Radius outlier removal
     ror_pts, _ = remove_outliers_radius(pts, radius=0.5, min_neighbors=5)
     assert ror_pts.shape[0] == 50  # Only the cluster points have >= 5 neighbors within 0.5m
+
+
+def test_intensity_nan_inf_removal() -> None:
+    """Ensure non-finite values (NaN, +Inf, -Inf) in intensity are removed and points remain aligned."""
+    pts = np.array(
+        [
+            [1.0, 2.0, 3.0],
+            [4.0, 5.0, 6.0],
+            [7.0, 8.0, 9.0],
+            [10.0, 11.0, 12.0],
+            [13.0, 14.0, 15.0],
+        ],
+        dtype=np.float32,
+    )
+    intensity = np.array([0.5, np.nan, 0.8, np.inf, -np.inf], dtype=np.float32)
+
+    san_pts, san_int = validate_and_sanitize_points(pts, intensity)
+
+    assert san_pts.shape == (2, 3)
+    assert san_int is not None and san_int.shape == (2,)
+    np.testing.assert_allclose(san_pts[0], [1.0, 2.0, 3.0])
+    np.testing.assert_allclose(san_pts[1], [7.0, 8.0, 9.0])
+    np.testing.assert_allclose(san_int, [0.5, 0.8])
+    assert not np.isnan(san_int).any()
+    assert not np.isinf(san_int).any()
+
+
+def test_invalid_inputs_extended() -> None:
+    """Verify validation edge cases and parameter constraints across preprocessing utilities."""
+    # Nested Python list input conversion to numpy float32
+    raw_list = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+    pts, _ = validate_and_sanitize_points(raw_list)
+    assert isinstance(pts, np.ndarray)
+    assert pts.dtype == np.float32
+    assert pts.shape == (2, 3)
+
+    # Empty points with non-empty intensity raises ValueError
+    with pytest.raises(ValueError, match="intensity array must have shape"):
+        validate_and_sanitize_points(np.zeros((0, 3), dtype=np.float32), intensity=np.ones((4,)))
+
+    # Range filter: min_range < 0 raises ValueError
+    with pytest.raises(ValueError, match="min_range must be non-negative"):
+        filter_by_range(np.ones((5, 3)), min_range=-1.0, max_range=10.0)
+
+    # Range filter: min_range > max_range raises ValueError
+    with pytest.raises(ValueError, match="cannot be greater than max_range"):
+        filter_by_range(np.ones((5, 3)), min_range=20.0, max_range=10.0)
+
+    # Voxel downsample: leaf_size <= 0 raises ValueError
+    with pytest.raises(ValueError, match="leaf_size must be positive"):
+        voxel_downsample(np.ones((5, 3)), leaf_size=0.0)
+
+    # Transform coordinates: invalid matrix shape raises ValueError
+    with pytest.raises(ValueError, match="transform_matrix must have shape"):
+        transform_coordinates(np.ones((5, 3)), np.eye(3))
+
+    # Transform coordinates: empty input returns empty (0, 3) float32 array
+    empty_trans = transform_coordinates(np.zeros((0, 3), dtype=np.float32), np.eye(4))
+    assert empty_trans.shape == (0, 3)
+    assert empty_trans.dtype == np.float32
+
+
+def test_full_pipeline_determinism_regression() -> None:
+    """Ensure running the complete multi-stage pipeline twice produces bit-for-bit identical results."""
+    rng = np.random.default_rng(777)
+    raw_pts = rng.uniform(-40.0, 40.0, (1500, 3)).astype(np.float32)
+    # Inject scattered non-finite values
+    raw_pts[100, 0] = np.nan
+    raw_pts[200, 1] = np.inf
+    raw_int = rng.uniform(0.0, 1.0, 1500).astype(np.float32)
+    raw_int[300] = np.nan
+
+    # 45-degree rotation around Z and translation
+    c = np.cos(np.pi / 4)
+    s = np.sin(np.pi / 4)
+    t_mat = np.array(
+        [
+            [c, -s, 0.0, 5.0],
+            [s,  c, 0.0, -3.0],
+            [0.0, 0.0, 1.0, 1.5],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+        dtype=np.float64,
+    )
+
+    cfg = PreprocessingConfig(
+        min_range=1.0,
+        max_range=35.0,
+        range_filter_enabled=True,
+        voxel_downsample_enabled=True,
+        voxel_leaf_size=0.25,
+        outlier_removal_enabled=True,
+        outlier_nb_neighbors=15,
+        outlier_std_ratio=2.0,
+        coordinate_transform=t_mat,
+    )
+    preprocessor = LiDARPreprocessor(config=cfg)
+
+    frame_in_1 = PointCloudFrame(points=raw_pts.copy(), intensity=raw_int.copy(), timestamp=10.5, frame_id="lidar_top")
+    frame_in_2 = PointCloudFrame(points=raw_pts.copy(), intensity=raw_int.copy(), timestamp=10.5, frame_id="lidar_top")
+
+    out_1, metrics_1 = preprocessor.preprocess(frame_in_1)
+    out_2, metrics_2 = preprocessor.preprocess(frame_in_2)
+
+    np.testing.assert_array_equal(out_1.points, out_2.points)
+    np.testing.assert_array_equal(out_1.intensity, out_2.intensity)
+    assert out_1.points.dtype == np.float32
+    assert out_1.intensity.dtype == np.float32
+    assert out_1.timestamp == out_2.timestamp == 10.5
+    assert out_1.frame_id == out_2.frame_id == "lidar_top"
+    np.testing.assert_array_equal(out_1.sensor_pose, out_2.sensor_pose)
+    assert metrics_1.input_points == metrics_2.input_points
+    assert metrics_1.output_points == metrics_2.output_points
+    assert np.isclose(metrics_1.reduction_ratio, metrics_2.reduction_ratio)
+
+
+def test_coordinate_transformation_metadata_preservation() -> None:
+    """Verify coordinate transformation modifies geometry while strictly preserving frame metadata."""
+    pose = np.array(
+        [
+            [1.0, 0.0, 0.0, 10.0],
+            [0.0, 1.0, 0.0, 20.0],
+            [0.0, 0.0, 1.0, 30.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+        dtype=np.float64,
+    )
+    frame = PointCloudFrame(
+        points=np.array([[10.0, 0.0, 0.0], [20.0, 0.0, 0.0]], dtype=np.float32),
+        intensity=np.array([0.5, 0.9], dtype=np.float32),
+        timestamp=42.123,
+        frame_id="custom_lidar_frame_99",
+        sensor_pose=pose,
+    )
+
+    t_mat = np.array(
+        [
+            [0.0, -1.0, 0.0, 1.0],
+            [1.0,  0.0, 0.0, 2.0],
+            [0.0,  0.0, 1.0, 3.0],
+            [0.0,  0.0, 0.0, 1.0],
+        ],
+        dtype=np.float64,
+    )
+    cfg = PreprocessingConfig(coordinate_transform=t_mat)
+    preprocessor = LiDARPreprocessor(config=cfg)
+    processed, _ = preprocessor.preprocess(frame)
+
+    # Coordinates transformed: (x, y, z) -> (-y + 1, x + 2, z + 3)
+    np.testing.assert_allclose(processed.points[0], [1.0, 12.0, 3.0], atol=1e-5)
+    np.testing.assert_allclose(processed.points[1], [1.0, 22.0, 3.0], atol=1e-5)
+
+    # Metadata strictly preserved
+    assert processed.timestamp == 42.123
+    assert processed.frame_id == "custom_lidar_frame_99"
+    np.testing.assert_array_equal(processed.sensor_pose, pose)
+
+
+def test_pipeline_from_config_file() -> None:
+    """Verify preprocessor initialization directly from default YAML configuration file."""
+    preprocessor = LiDARPreprocessor.from_config_file("configs/default_config.yaml")
+    assert preprocessor.config.min_range == 0.5
+    assert preprocessor.config.max_range == 100.0
+    assert preprocessor.config.range_filter_enabled is True
+    assert preprocessor.config.voxel_leaf_size == 0.02
+    assert preprocessor.config.outlier_removal_enabled is True

@@ -128,8 +128,13 @@ def load_raw_points(
     else:
         if not isinstance(points, np.ndarray):
             points = np.asarray(points, dtype=np.float32)
-        if intensity is not None and not isinstance(intensity, np.ndarray):
-            intensity = np.asarray(intensity, dtype=np.float32)
+        else:
+            points = points.astype(np.float32, copy=False)
+        if intensity is not None:
+            if not isinstance(intensity, np.ndarray):
+                intensity = np.asarray(intensity, dtype=np.float32)
+            else:
+                intensity = intensity.astype(np.float32, copy=False)
 
     pose = np.eye(4, dtype=np.float64) if sensor_pose is None else sensor_pose
 

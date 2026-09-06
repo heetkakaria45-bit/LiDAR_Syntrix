@@ -41,6 +41,15 @@ def validate_and_sanitize_points(
     if points.ndim != 2 or points.shape[1] != 3:
         raise ValueError(f"points array must have shape (N, 3), got {points.shape}")
 
+    if intensity is not None:
+        if not isinstance(intensity, np.ndarray):
+            intensity = np.asarray(intensity, dtype=np.float32)
+        if intensity.ndim != 1 or intensity.shape[0] != points.shape[0]:
+            raise ValueError(
+                f"intensity array must have shape (N,), got {intensity.shape} "
+                f"for points of length {points.shape[0]}"
+            )
+
     # Handle empty input gracefully
     if points.shape[0] == 0:
         empty_pts = np.zeros((0, 3), dtype=np.float32)
@@ -51,13 +60,6 @@ def validate_and_sanitize_points(
     finite_mask = np.all(np.isfinite(points), axis=1)
 
     if intensity is not None:
-        if not isinstance(intensity, np.ndarray):
-            intensity = np.asarray(intensity, dtype=np.float32)
-        if intensity.ndim != 1 or intensity.shape[0] != points.shape[0]:
-            raise ValueError(
-                f"intensity array must have shape (N,), got {intensity.shape} "
-                f"for points of length {points.shape[0]}"
-            )
         # Intensity must also be finite
         finite_mask &= np.isfinite(intensity)
         sanitized_intensity = intensity[finite_mask].astype(np.float32, copy=False)
