@@ -7,6 +7,8 @@ Responsibilities:
     - Cell-to-world center coordinate reconstruction
     - Half-open ring boundary enforcement [r_k, r_{k+1})
     - Configuration ingestion without hardcoded spatial constants
+    - Unified canonical interface supporting both CellKey and tuple compatibility
+    - High-throughput vectorized point-to-cell assignments for mapping integration
 """
 
 from __future__ import annotations
@@ -23,6 +25,10 @@ import yaml
 class CellKey(NamedTuple):
     """Canonical, hashable cell identifier representing a discrete spatial grid cell.
 
+    Inherits from NamedTuple to provide seamless tuple compatibility (unpackable as
+    (level, i, j) or (ring_idx, cell_x, cell_y), indexable via cell[0], cell[1], cell[2])
+    while offering named attribute access.
+
     Attributes:
         level: Foveation ring level ID (e.g. 0, 1, 2, 3).
         i: Discrete X column index (forward axis).
@@ -32,6 +38,45 @@ class CellKey(NamedTuple):
     level: int
     i: int
     j: int
+
+    @property
+    def ring_idx(self) -> int:
+        """Alias for level / ring index (0..3)."""
+        return self.level
+
+    @property
+    def ring(self) -> int:
+        """Alias for level / ring index (0..3)."""
+        return self.level
+
+    @property
+    def level_id(self) -> int:
+        """Alias for level ID (0..3)."""
+        return self.level
+
+    @property
+    def cell_x(self) -> int:
+        """Alias for discrete X grid coordinate i."""
+        return self.i
+
+    @property
+    def cell_y(self) -> int:
+        """Alias for discrete Y grid coordinate j."""
+        return self.j
+
+    @property
+    def x(self) -> int:
+        """Alias for discrete X coordinate i."""
+        return self.i
+
+    @property
+    def y(self) -> int:
+        """Alias for discrete Y coordinate j."""
+        return self.j
+
+    def to_tuple(self) -> Tuple[int, int, int]:
+        """Convert to standard 3-tuple (level, i, j)."""
+        return (self.level, self.i, self.j)
 
     def to_packed_uint64(self) -> int:
         """Pack (level, i, j) into a unique 64-bit unsigned integer key."""
@@ -224,6 +269,11 @@ class FoveatedGridIndexer:
 
         return None
 
+    def get_level_idx_for_distance(self, distance: float) -> Optional[int]:
+        """Look up integer level index [0..3] for given 2D radial distance."""
+        lvl = self.get_level_for_distance(distance)
+        return lvl.level_id if lvl is not None else None
+
     def resolution_for_distance(self, distance: float) -> Optional[float]:
         """Look up the spatial grid resolution (delta in meters) for a given distance.
 
@@ -239,7 +289,9 @@ class FoveatedGridIndexer:
         lvl = self.get_level_for_distance(distance)
         return lvl.resolution if lvl is not None else None
 
-    def world_to_cell(self, x: float, y: float) -> Optional[CellKey]:
+    def world_to_cell(
+        self, x: float, y: float, level: Optional[int] = None
+    ) -> Optional[CellKey]:
         """Map continuous 2D world coordinates to a canonical discrete CellKey.
 
         Conventions:
@@ -253,46 +305,70 @@ class FoveatedGridIndexer:
         Args:
             x: Forward Cartesian coordinate in meters (vehicle heading).
             y: Left Cartesian coordinate in meters (lateral axis).
+            level: Optional explicit foveation level override.
 
         Returns:
-            CellKey(level, i, j) if (x, y) is within [0, max_radius), else None.
+            CellKey(level, i, j) if (x, y) is within bounds, else None.
         """
-        r = math.hypot(x, y)
-        lvl = self.get_level_for_distance(r)
-        if lvl is None:
-            return None
+        if level is not None:
+            if level not in self._level_by_id:
+                return None
+            lvl = self._level_by_id[level]
+        else:
+            r = math.hypot(x, y)
+            lvl = self.get_level_for_distance(r)
+            if lvl is None:
+                return None
 
         delta = lvl.resolution
         x_min = lvl.x_min
         y_min = lvl.y_min
 
         # Deterministic floor quantization handling positive and negative coords.
-        # round(..., 9) guards against IEEE-754 float precision errors (e.g. 10.1 / 0.05 = 201.99999999999997)
+        # round(..., 9) guards against IEEE-754 float precision errors
         i = int(math.floor(round((x - x_min) / delta, 9)))
         j = int(math.floor(round((y - y_min) / delta, 9)))
 
         return CellKey(level=lvl.level_id, i=i, j=j)
 
-    def cell_to_world(self, cell: Union[CellKey, Tuple[int, int, int]]) -> Tuple[float, float]:
-        """Reconstruct the physical continuous 2D cell center coordinates from a CellKey.
+    def cell_to_world(
+        self,
+        cell_or_ix: Union[CellKey, Tuple[int, int, int], int],
+        iy: Optional[int] = None,
+        level: Optional[int] = None,
+    ) -> Tuple[float, float]:
+        """Reconstruct physical continuous 2D cell center coordinates from a CellKey or indices.
+
+        Supports flexible call signatures:
+            - cell_to_world(cell) where cell is CellKey or (level, i, j)
+            - cell_to_world(ix, iy, level)
+            - cell_to_world(level, ix, iy)
 
         Center coordinate formula:
             x_center = x_min + (i + 0.5) * delta
             y_center = y_min + (j + 0.5) * delta
         where x_min = -max_range and y_min = -max_range for the cell's foveation level.
 
-        Args:
-            cell: CellKey instance or (level, i, j) tuple.
-
         Returns:
             Tuple of (x_center, y_center) in meters in the map/vehicle frame.
-
-        Raises:
-            KeyError: If cell's level ID is not configured.
         """
-        level_id, i, j = cell[0], cell[1], cell[2]
-        lvl = self.get_level(level_id)
+        if iy is not None and level is not None:
+            # 3 arguments provided: resolve level vs (ix, iy)
+            arg0 = int(cell_or_ix)
+            arg1 = int(iy)
+            arg2 = int(level)
+            if arg2 in self._level_by_id and arg0 not in self._level_by_id:
+                level_id, i, j = arg2, arg0, arg1
+            elif arg0 in self._level_by_id and arg2 not in self._level_by_id:
+                level_id, i, j = arg0, arg1, arg2
+            else:
+                # Default convention (ix, iy, level)
+                level_id, i, j = arg2, arg0, arg1
+        else:
+            cell = cell_or_ix
+            level_id, i, j = cell[0], cell[1], cell[2]
 
+        lvl = self.get_level(level_id)
         delta = lvl.resolution
         x_min = lvl.x_min
         y_min = lvl.y_min
@@ -346,6 +422,68 @@ class FoveatedGridIndexer:
 
         return valid_mask, packed_keys
 
+    def assign_points(
+        self, points: np.ndarray
+    ) -> Dict[str, Dict[Tuple[int, int], Tuple[float, float, np.ndarray]]]:
+        """Assign (N, 3) continuous points to discrete spatial grid cells across foveation levels.
+
+        Conforms directly to GridIndexerProtocol for seamless consumption by SemanticElevationMapper.
+
+        Returns:
+            Dict mapping:
+                resolution_level (str) ->
+                    (grid_x, grid_y) ->
+                        (center_x, center_y, point_indices_array)
+        """
+        pts = np.asarray(points, dtype=np.float64)
+        if pts.size == 0 or pts.ndim != 2 or pts.shape[1] < 2:
+            return {lvl.name: {} for lvl in self._levels}
+
+        n_points = pts.shape[0]
+        x = pts[:, 0]
+        y = pts[:, 1]
+        r = np.hypot(x, y)
+
+        grid_assignments: Dict[str, Dict[Tuple[int, int], Tuple[float, float, np.ndarray]]] = {
+            lvl.name: {} for lvl in self._levels
+        }
+
+        for lvl in self._levels:
+            mask = (r >= lvl.min_range) & (r < lvl.max_range)
+            indices = np.nonzero(mask)[0]
+            if indices.size == 0:
+                continue
+
+            px = x[indices]
+            py = y[indices]
+            delta = lvl.resolution
+            x_min = lvl.x_min
+            y_min = lvl.y_min
+
+            gx = np.floor(np.round((px - x_min) / delta, 9)).astype(np.int32)
+            gy = np.floor(np.round((py - y_min) / delta, 9)).astype(np.int32)
+
+            keys = np.stack([gx, gy], axis=1)
+            unique_keys, inverse_idx, counts = np.unique(
+                keys, axis=0, return_inverse=True, return_counts=True
+            )
+
+            order = np.argsort(inverse_idx, kind="stable")
+            sorted_indices = indices[order]
+            splits = np.split(sorted_indices, np.cumsum(counts)[:-1])
+
+            half_delta = delta / 2.0
+            for (cx_idx, cy_idx), cell_point_indices in zip(unique_keys, splits):
+                center_x = float(x_min + cx_idx * delta + half_delta)
+                center_y = float(y_min + cy_idx * delta + half_delta)
+                grid_assignments[lvl.name][(int(cx_idx), int(cy_idx))] = (
+                    center_x,
+                    center_y,
+                    cell_point_indices,
+                )
+
+        return grid_assignments
+
 
 # Standalone module-level helper functions for convenient functional usage
 _GLOBAL_INDEXER: Optional[FoveatedGridIndexer] = None
@@ -367,18 +505,39 @@ def resolution_for_distance(
     return idx.resolution_for_distance(distance)
 
 
+def get_level_for_distance(
+    distance: float, indexer: Optional[FoveatedGridIndexer] = None
+) -> Optional[FoveationLevelConfig]:
+    """Look up level config for radial distance using default or provided indexer."""
+    idx = indexer or _get_global_indexer()
+    return idx.get_level_for_distance(distance)
+
+
 def world_to_cell(
-    x: float, y: float, indexer: Optional[FoveatedGridIndexer] = None
+    x: float,
+    y: float,
+    level: Optional[int] = None,
+    indexer: Optional[FoveatedGridIndexer] = None,
 ) -> Optional[CellKey]:
     """Map world coordinates (x, y) to CellKey using default or provided indexer."""
     idx = indexer or _get_global_indexer()
-    return idx.world_to_cell(x, y)
+    return idx.world_to_cell(x, y, level=level)
 
 
 def cell_to_world(
-    cell: Union[CellKey, Tuple[int, int, int]],
+    cell_or_ix: Union[CellKey, Tuple[int, int, int], int],
+    iy: Optional[int] = None,
+    level: Optional[int] = None,
     indexer: Optional[FoveatedGridIndexer] = None,
 ) -> Tuple[float, float]:
     """Reconstruct world cell center (x_center, y_center) using default or provided indexer."""
     idx = indexer or _get_global_indexer()
-    return idx.cell_to_world(cell)
+    return idx.cell_to_world(cell_or_ix, iy=iy, level=level)
+
+
+def assign_points(
+    points: np.ndarray, indexer: Optional[FoveatedGridIndexer] = None
+) -> Dict[str, Dict[Tuple[int, int], Tuple[float, float, np.ndarray]]]:
+    """Assign point array to foveated grid cells using default or provided indexer."""
+    idx = indexer or _get_global_indexer()
+    return idx.assign_points(points)

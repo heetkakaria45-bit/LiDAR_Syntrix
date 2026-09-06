@@ -14,7 +14,9 @@ from src.foveated_grid.foveated_indexer import (
     CellKey,
     FoveatedGridIndexer,
     FoveationLevelConfig,
+    assign_points,
     cell_to_world,
+    get_level_for_distance,
     load_foveation_config,
     resolution_for_distance,
     world_to_cell,
@@ -36,6 +38,8 @@ __all__ = [
     "ingest_point_cloud",
     "load_foveation_config",
     "resolution_for_distance",
+    "get_level_for_distance",
     "world_to_cell",
     "cell_to_world",
+    "assign_points",
 ]

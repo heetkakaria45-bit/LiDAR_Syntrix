@@ -387,6 +387,10 @@ class SparseFoveatedGrid:
             return None
         return self._cells.get(key)
 
+    def get_cell_at(self, x: float, y: float) -> Optional[SparseCell]:
+        """Alias for query(x, y). Look up occupied SparseCell at continuous world coordinates."""
+        return self.query(x, y)
+
     def query_cell(self, cell_key: Union[CellKey, Tuple[int, int, int]]) -> Optional[SparseCell]:
         """Look up occupied SparseCell directly by discrete CellKey.
 
@@ -398,6 +402,10 @@ class SparseFoveatedGrid:
         """
         key = cell_key if isinstance(cell_key, CellKey) else CellKey(*cell_key)
         return self._cells.get(key)
+
+    def get(self, cell_key: Union[CellKey, Tuple[int, int, int]]) -> Optional[SparseCell]:
+        """Alias for query_cell(cell_key)."""
+        return self.query_cell(cell_key)
 
     def query_region(
         self,
