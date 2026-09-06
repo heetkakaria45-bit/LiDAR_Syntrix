@@ -183,3 +183,40 @@ class GroundFilter:
         non_ground_pts = pts[~ground_mask]
 
         return ground_pts, non_ground_pts, ground_mask
+
+
+def validate_and_sanitize_points(
+    points: np.ndarray, intensity: Optional[np.ndarray] = None
+) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+    """Validate point cloud array and filter out non-finite (NaN, Inf) entries.
+
+    Args:
+        points: (N, 3) float array of Cartesian coordinates.
+        intensity: Optional (N,) float array of point intensities.
+
+    Returns:
+        Tuple of (sanitized_points, sanitized_intensity).
+    """
+    pts = np.asarray(points, dtype=np.float32)
+    if pts.size == 0:
+        empty_pts = np.zeros((0, 3), dtype=np.float32)
+        empty_int = np.zeros((0,), dtype=np.float32) if intensity is not None else None
+        return empty_pts, empty_int
+
+    if pts.ndim != 2 or pts.shape[1] != 3:
+        raise ValueError(f"points must have shape (N, 3), got {pts.shape}")
+
+    finite_mask = np.isfinite(pts).all(axis=1)
+    sanitized_pts = pts[finite_mask]
+
+    sanitized_int = None
+    if intensity is not None:
+        int_arr = np.asarray(intensity, dtype=np.float32)
+        if int_arr.shape[0] != pts.shape[0]:
+            raise ValueError(
+                f"intensity length {int_arr.shape[0]} does not match points length {pts.shape[0]}"
+            )
+        sanitized_int = int_arr[finite_mask]
+
+    return sanitized_pts, sanitized_int
+

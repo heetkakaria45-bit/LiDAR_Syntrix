@@ -90,3 +90,8 @@ frontend/.vite/
 .env
 .env.local
 *.local
+
+# Generated Reports & PDFs
+docs/reports/
+*.pdf
+

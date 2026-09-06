@@ -15,6 +15,11 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import numpy as np
 
 from src.contracts import PointCloudFrame, SemanticMap, SemanticPointCloud, SyntheticSceneConfig
+from src.evaluation.metrics import (
+    compute_distance_stratified_metrics,
+    compute_elevation_rmse,
+    compute_semantic_iou,
+)
 from src.foveated_grid.grid_indexer import FoveatedGridIndexer
 from src.integration.telemetry import TelemetryProfiler
 from src.mapping import (
@@ -76,6 +81,7 @@ class PipelineOrchestrator:
         self.last_terrain: Optional[Dict[str, Any]] = None
         self.last_hazards: Optional[Dict[str, Any]] = None
         self.active_source_mode = self.mode
+        self._last_ground_truth_cloud: Optional[SemanticPointCloud] = None
 
     def _acquire_frame(self, custom_frame: Optional[PointCloudFrame] = None) -> PointCloudFrame:
         """Acquire a frame using the active pipeline mode with automatic fallback."""
@@ -93,7 +99,8 @@ class PipelineOrchestrator:
             seed=42 + self.frame_count,
             num_points=12000,
         )
-        frame, _ = generate_synthetic_scene(config)
+        frame, gt_cloud = generate_synthetic_scene(config)
+        self._last_ground_truth_cloud = gt_cloud
         return frame
 
     def process_frame(
@@ -172,7 +179,34 @@ class PipelineOrchestrator:
         semantic_map.metadata["hazards"] = hazards
         self.profiler.stop_stage("hazard_analysis")
 
-        # 6. Telemetry recording
+        # 6. Empirical Evaluation & Accuracy Benchmarking
+        self.profiler.start_stage("evaluation")
+        eval_metrics: Dict[str, Any] = {"status": "NO_GROUND_TRUTH"}
+        if (
+            self._last_ground_truth_cloud is not None
+            and len(self._last_ground_truth_cloud.points) == len(semantic_cloud.points)
+        ):
+            iou_results = compute_semantic_iou(
+                pred_classes=semantic_cloud.semantic_class,
+                gt_classes=self._last_ground_truth_cloud.semantic_class,
+            )
+            distances = np.hypot(semantic_cloud.points[:, 0], semantic_cloud.points[:, 1])
+            stratified = compute_distance_stratified_metrics(
+                distances=distances,
+                pred_elevations=semantic_cloud.points[:, 2],
+                gt_elevations=self._last_ground_truth_cloud.points[:, 2],
+            )
+            eval_metrics = {
+                "status": "EVALUATED",
+                "classification": "MEASURED",
+                "mIoU": float(iou_results["mIoU"]),
+                "per_class_iou": {str(k): float(v) for k, v in iou_results["per_class_iou"].items()},
+                "distance_stratified_rmse": stratified,
+            }
+        semantic_map.metadata["evaluation"] = eval_metrics
+        self.profiler.stop_stage("evaluation")
+
+        # 7. Telemetry recording
         total_time_ms = (time.perf_counter() - frame_start) * 1000.0
         self.profiler.record_frame_end(total_time_ms)
 
@@ -193,5 +227,13 @@ class PipelineOrchestrator:
         )
         telemetry_snap["pipeline_mode"] = self.active_source_mode.value
         telemetry_snap["frame_count"] = self.frame_count
+        telemetry_snap["evaluation"] = eval_metrics
 
         return input_frame, semantic_cloud, semantic_map, telemetry_snap
+
+    def evaluate_live_frame(self) -> Dict[str, Any]:
+        """Retrieve empirical evaluation metrics calculated on the latest frame."""
+        if self.last_map and "evaluation" in self.last_map.metadata:
+            return self.last_map.metadata["evaluation"]
+        return {"status": "UNAVAILABLE", "classification": "UNSUPPORTED"}
+

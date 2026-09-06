@@ -4,7 +4,13 @@ Comprehensive Unit Tests for Vedant's Semantic Perception Subsystem.
 
 import unittest
 import numpy as np
-from sklearn.ensemble import RandomForestClassifier
+
+try:
+    from sklearn.ensemble import RandomForestClassifier
+    SKLEARN_AVAILABLE = True
+except ImportError:
+    SKLEARN_AVAILABLE = False
+    RandomForestClassifier = None
 
 from src.common.types import (
     PointCloudFrame,
@@ -221,6 +227,7 @@ class TestSemanticPerception(unittest.TestCase):
         with self.assertRaises(ValueError):
             get_adapter("unknown_dataset")
 
+    @unittest.skipUnless(SKLEARN_AVAILABLE, "scikit-learn is not installed in environment")
     def test_custom_sklearn_model_wrapper(self) -> None:
         # Train a toy RandomForest on synthetic 10D features
         X_dummy = np.random.randn(20, 10).astype(np.float32)

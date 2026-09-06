@@ -11,7 +11,7 @@ Responsibilities:
 
 from src.foveated_grid.foveated_indexer import (
     CellKey,
-    FoveatedGridIndexer as LegacyFoveatedGridIndexer,
+    FoveatedGridIndexer,
     FoveationLevelConfig,
     cell_to_world,
     load_foveation_config,
@@ -26,9 +26,11 @@ from src.foveated_grid.sparse_grid import (
 )
 from src.foveated_grid.grid_indexer import (
     DEFAULT_RINGS,
-    FoveatedGridIndexer,
     FoveationRing,
 )
+
+# Backwards compatibility alias
+LegacyFoveatedGridIndexer = FoveatedGridIndexer
 
 __all__ = [
     "CellKey",

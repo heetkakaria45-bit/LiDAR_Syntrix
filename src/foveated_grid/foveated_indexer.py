@@ -27,11 +27,15 @@ class CellKey(NamedTuple):
         level: Foveation ring level ID (e.g. 0, 1, 2, 3).
         i: Discrete X column index (forward axis).
         j: Discrete Y row index (left axis).
+        cx: Center X coordinate in meters.
+        cy: Center Y coordinate in meters.
     """
 
     level: int
     i: int
     j: int
+    cx: float = 0.0
+    cy: float = 0.0
 
     def to_packed_uint64(self) -> int:
         """Pack (level, i, j) into a unique 64-bit unsigned integer key."""
@@ -44,6 +48,15 @@ class CellKey(NamedTuple):
         i = (packed >> 24) & 0xFFFFFF
         j = packed & 0xFFFFFF
         return cls(level=level, i=i, j=j)
+
+    def __eq__(self, other: Any) -> bool:
+        if isinstance(other, (CellKey, tuple)):
+            if len(other) >= 3:
+                return self.level == other[0] and self.i == other[1] and self.j == other[2]
+        return False
+
+    def __hash__(self) -> int:
+        return hash((self.level, self.i, self.j))
 
 
 @dataclass(frozen=True)
@@ -194,6 +207,11 @@ class FoveatedGridIndexer:
         return list(self._levels)
 
     @property
+    def rings(self) -> List[FoveationLevelConfig]:
+        """Alias for levels for compatibility with multi-ring pipeline interfaces."""
+        return list(self._levels)
+
+    @property
     def max_radius(self) -> float:
         """Maximum outer mapping radius in meters."""
         return self._max_radius
@@ -223,6 +241,10 @@ class FoveatedGridIndexer:
                 return lvl
 
         return None
+
+    def get_ring_for_distance(self, distance: float) -> Optional[FoveationLevelConfig]:
+        """Find the foveation ring for a given distance using half-open intervals [min, max)."""
+        return self.get_level_for_distance(distance)
 
     def resolution_for_distance(self, distance: float) -> Optional[float]:
         """Look up the spatial grid resolution (delta in meters) for a given distance.
@@ -271,25 +293,35 @@ class FoveatedGridIndexer:
         i = int(math.floor(round((x - x_min) / delta, 9)))
         j = int(math.floor(round((y - y_min) / delta, 9)))
 
-        return CellKey(level=lvl.level_id, i=i, j=j)
+        cx = x_min + (i + 0.5) * delta
+        cy = y_min + (j + 0.5) * delta
 
-    def cell_to_world(self, cell: Union[CellKey, Tuple[int, int, int]]) -> Tuple[float, float]:
-        """Reconstruct the physical continuous 2D cell center coordinates from a CellKey.
+        return CellKey(level=lvl.level_id, i=i, j=j, cx=cx, cy=cy)
 
-        Center coordinate formula:
-            x_center = x_min + (i + 0.5) * delta
-            y_center = y_min + (j + 0.5) * delta
-        where x_min = -max_range and y_min = -max_range for the cell's foveation level.
+    def cell_to_world(
+        self,
+        cell: Union[CellKey, Tuple[int, int, int], int],
+        cell_ix: Optional[int] = None,
+        cell_iy: Optional[int] = None,
+    ) -> Union[Tuple[float, float], Tuple[float, float, float]]:
+        """Reconstruct physical continuous 2D cell center coordinates.
 
-        Args:
-            cell: CellKey instance or (level, i, j) tuple.
-
-        Returns:
-            Tuple of (x_center, y_center) in meters in the map/vehicle frame.
-
-        Raises:
-            KeyError: If cell's level ID is not configured.
+        Supports both:
+            - Single argument: cell (CellKey or (level, i, j) tuple) -> returns (center_x, center_y)
+            - Three arguments: (level_id, cell_ix, cell_iy) -> returns (center_x, center_y, resolution)
         """
+        if cell_ix is not None and cell_iy is not None:
+            level_id = int(cell)
+            i = int(cell_ix)
+            j = int(cell_iy)
+            lvl = self.get_level(level_id)
+            delta = lvl.resolution
+            x_min = lvl.x_min
+            y_min = lvl.y_min
+            center_x = x_min + (i + 0.5) * delta
+            center_y = y_min + (j + 0.5) * delta
+            return center_x, center_y, delta
+
         level_id, i, j = cell[0], cell[1], cell[2]
         lvl = self.get_level(level_id)
 
@@ -301,6 +333,123 @@ class FoveatedGridIndexer:
         y_center = y_min + (j + 0.5) * delta
 
         return (x_center, y_center)
+
+    def bin_points(
+        self, points: np.ndarray
+    ) -> Dict[Tuple[int, int, int], List[int]]:
+        """Vectorized / fast binning of (N, 3) points into multi-resolution cells.
+
+        Returns:
+            Dictionary mapping (level_id, cell_ix, cell_iy) -> list of point indices.
+        """
+        if points.shape[0] == 0:
+            return {}
+
+        x = points[:, 0]
+        y = points[:, 1]
+        distances = np.hypot(x, y)
+
+        cell_bins: Dict[Tuple[int, int, int], List[int]] = {}
+
+        for ring in self._levels:
+            if ring.level_id == self._levels[-1].level_id:
+                mask = (distances >= ring.min_range) & (distances <= ring.max_range)
+            else:
+                mask = (distances >= ring.min_range) & (distances < ring.max_range)
+
+            indices = np.nonzero(mask)[0]
+            if indices.size == 0:
+                continue
+
+            res = ring.resolution
+            ixs = np.floor(x[indices] / res).astype(np.int32)
+            iys = np.floor(y[indices] / res).astype(np.int32)
+
+            for p_idx, c_ix, c_iy in zip(indices, ixs, iys):
+                key = (ring.level_id, int(c_ix), int(c_iy))
+                if key not in cell_bins:
+                    cell_bins[key] = []
+                cell_bins[key].append(int(p_idx))
+
+        return cell_bins
+
+    def assign_points(
+        self, points: np.ndarray
+    ) -> Dict[str, Dict[Tuple[int, int], Tuple[float, float, np.ndarray]]]:
+        """Assign (N, 3) points to foveation levels and discrete 2D grid cells.
+
+        Returns:
+            Dict mapping ring_name (str) -> (grid_x, grid_y) -> (center_x, center_y, point_indices_array)
+        """
+        n_points = points.shape[0]
+        grid_assignments: Dict[str, Dict[Tuple[int, int], Tuple[float, float, np.ndarray]]] = {
+            ring.name: {} for ring in self._levels
+        }
+        if n_points == 0:
+            return grid_assignments
+
+        x = points[:, 0]
+        y = points[:, 1]
+        dist = np.hypot(x, y)
+        assigned = np.zeros(n_points, dtype=bool)
+
+        for ring in self._levels:
+            if ring.level_id == self._levels[-1].level_id:
+                mask = (~assigned) & (dist >= ring.min_range) & (dist <= ring.max_range)
+            else:
+                mask = (~assigned) & (dist >= ring.min_range) & (dist < ring.max_range)
+
+            assigned |= mask
+            indices = np.nonzero(mask)[0]
+            if indices.size == 0:
+                continue
+
+            res = ring.resolution
+            px = x[indices]
+            py = y[indices]
+
+            gx = np.floor(px / res).astype(np.int32)
+            gy = np.floor(py / res).astype(np.int32)
+
+            keys = np.stack([gx, gy], axis=1)
+            unique_keys, inverse_idx, counts = np.unique(
+                keys, axis=0, return_inverse=True, return_counts=True
+            )
+
+            order = np.argsort(inverse_idx, kind="stable")
+            sorted_indices = indices[order]
+            splits = np.split(sorted_indices, np.cumsum(counts)[:-1])
+
+            for (cx_idx, cy_idx), cell_point_indices in zip(unique_keys, splits):
+                center_x = (cx_idx + 0.5) * res
+                center_y = (cy_idx + 0.5) * res
+                grid_assignments[ring.name][(int(cx_idx), int(cy_idx))] = (
+                    float(center_x),
+                    float(center_y),
+                    cell_point_indices,
+                )
+
+        return grid_assignments
+
+    def compute_adaptive_resolution(
+        self,
+        base_resolution: float,
+        semantic_priority: float = 0.0,
+        uncertainty: float = 0.0,
+        w_sem: float = 0.5,
+        w_unc: float = 0.3,
+    ) -> float:
+        """Compute target adaptive resolution given distance base, semantic importance and uncertainty.
+
+        Refinement formula:
+            res_target = res_base * (1.0 - w_sem * priority) * (1.0 - w_unc * uncertainty)
+        """
+        sem_factor = np.clip(1.0 - (w_sem * semantic_priority), 0.2, 1.0)
+        unc_factor = np.clip(1.0 - (w_unc * uncertainty), 0.5, 1.0)
+        refined_res = base_resolution * float(sem_factor * unc_factor)
+        return float(np.clip(refined_res, 0.05, base_resolution))
+
+
 
     def world_to_cell_batch(self, points: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """Vectorized conversion of continuous 2D/3D point array to discrete CellKey packed uint64.
