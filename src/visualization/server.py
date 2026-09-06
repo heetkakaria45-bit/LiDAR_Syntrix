@@ -139,56 +139,8 @@ class ControlCenterHandler(BaseHTTPRequestHandler):
         elif path == "/api/architecture":
             self._send_json(self._get_architecture_info())
         elif path in ("/api/benchmark", "/api/benchmarks"):
-            stats = BenchmarkRunner.compare_uniform_vs_foveated()
-            summary = self.orchestrator.profiler.get_summary()
-            measured_foveated_ms = float(summary.get("mean_frame_time_ms", 0.0))
-            if measured_foveated_ms <= 0.0:
-                if self.orchestrator.last_frame is None:
-                    self.orchestrator.process_frame()
-                summary = self.orchestrator.profiler.get_summary()
-                measured_foveated_ms = float(summary.get("mean_frame_time_ms", 18.2))
-
-            cell_ratio = float(stats["comparison"]["cell_count_reduction_factor"])
-            measured_uniform_ms = round(measured_foveated_ms * min(cell_ratio, 3.75), 1)
-
-            stats["uniform_vs_foveated"] = {
-                "uniform_cell_count": stats["uniform_grid"]["total_cells"],
-                "foveated_cell_count": stats["foveated_grid"]["total_cells"],
-                "cell_reduction_ratio": round(cell_ratio, 2),
-                "memory_uniform_mb": round(stats["uniform_grid"]["memory_mb"], 2),
-                "memory_foveated_mb": round(stats["foveated_grid"]["memory_mb"], 2),
-                "memory_reduction_pct": round(stats["comparison"]["memory_savings_pct"], 2),
-                "processing_time_uniform_ms": measured_uniform_ms,
-                "processing_time_foveated_ms": round(measured_foveated_ms, 2),
-                "speedup_factor": round(measured_uniform_ms / max(measured_foveated_ms, 0.001), 2),
-            }
-
-            eval_live = self.orchestrator.evaluate_live_frame()
-            strat_rmse = eval_live.get("distance_stratified_rmse", {})
-            r0_rmse = round(strat_rmse.get("near_0_10m", {}).get("rmse", 0.012) * 100.0, 2)
-            r1_rmse = round(strat_rmse.get("mid_near_10_25m", {}).get("rmse", 0.028) * 100.0, 2)
-            r2_rmse = round(strat_rmse.get("mid_25_50m", {}).get("rmse", 0.054) * 100.0, 2)
-            r3_rmse = round(strat_rmse.get("far_50_100m", {}).get("rmse", 0.112) * 100.0, 2)
-            live_miou = round(eval_live.get("mIoU", 0.948) * 100.0, 1)
-
-            total_f_cells = stats["foveated_grid"]["total_cells"]
-            cells_by_ring = stats["foveated_grid"]["cells_by_ring"]
-            density_r0 = round((cells_by_ring.get("near", 125664) / total_f_cells) * 100.0, 1)
-            density_r1 = round((cells_by_ring.get("mid_near", 164934) / total_f_cells) * 100.0, 1)
-            density_r2 = round((cells_by_ring.get("mid", 94248) / total_f_cells) * 100.0, 1)
-            density_r3 = round((cells_by_ring.get("far", 94248) / total_f_cells) * 100.0, 1)
-
-            stats["distance_bins"] = [
-                {"bin": "0-10m (Ring 0)", "resolution": "5 cm", "miou": live_miou, "elevation_rmse_cm": r0_rmse, "cell_density_pct": density_r0},
-                {"bin": "10-25m (Ring 1)", "resolution": "10 cm", "miou": round(max(live_miou - 3.6, 60.0), 1), "elevation_rmse_cm": r1_rmse, "cell_density_pct": density_r1},
-                {"bin": "25-50m (Ring 2)", "resolution": "25 cm", "miou": round(max(live_miou - 10.3, 50.0), 1), "elevation_rmse_cm": r2_rmse, "cell_density_pct": density_r2},
-                {"bin": "50-100m (Ring 3)", "resolution": "50 cm", "miou": round(max(live_miou - 18.7, 40.0), 1), "elevation_rmse_cm": r3_rmse, "cell_density_pct": density_r3},
-            ]
-            stats["metric_classification"] = {
-                "cell_and_memory": "CALCULATED (Geometric Annuli Formulation, 64B/cell)",
-                "processing_time_foveated": "MEASURED (TelemetryProfiler Mean Latency)",
-                "accuracy_metrics": eval_live.get("classification", "MEASURED (Synthetic Ground Truth Evaluation)"),
-            }
+            scene = self.orchestrator.synthetic_scene_type
+            stats = BenchmarkRunner.run_comparative_benchmark(scene_type=scene, num_runs=3, save_to_file=True)
             self._send_json(stats)
         elif path == "/api/frame":
             self._serve_latest_frame()

@@ -166,6 +166,11 @@ class SemanticPointCloud:
     def num_points(self) -> int:
         return self.points.shape[0]
 
+    @property
+    def semantic_class(self) -> np.ndarray:
+        """Alias for semantic_labels to maintain compatibility with src.contracts."""
+        return self.semantic_labels
+
 
 @dataclass
 class GridCell:

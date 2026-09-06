@@ -61,9 +61,14 @@ class PipelineOrchestrator:
         self.mode = mode
         self.synthetic_scene_type = synthetic_scene_type
         self.profiler = profiler if profiler is not None else TelemetryProfiler()
-        self.perception_model = (
-            perception_model if perception_model is not None else MockSemanticSegmenter()
-        )
+        if perception_model is not None:
+            self.perception_model = perception_model
+        else:
+            try:
+                from src.perception.interface import SemanticPerceptionEngine
+                self.perception_model = SemanticPerceptionEngine()
+            except Exception:
+                self.perception_model = MockSemanticSegmenter()
         self.grid_indexer = grid_indexer if grid_indexer is not None else FoveatedGridIndexer()
         self.mapping_config = mapping_config if mapping_config is not None else MappingConfig()
         self.mapper = (

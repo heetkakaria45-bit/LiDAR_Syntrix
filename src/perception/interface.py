@@ -63,8 +63,8 @@ class SemanticPerceptionEngine(ISemanticPerception):
             - Handles empty point clouds (N=0) without error.
             - Handles NaNs and Infs safely with fallback confidence.
         """
-        if not isinstance(frame, PointCloudFrame):
-            raise TypeError(f"Expected PointCloudFrame, got {type(frame)}")
+        if not hasattr(frame, "points") or frame.points is None:
+            raise TypeError(f"Expected PointCloudFrame with points, got {type(frame)}")
 
         t0 = time.perf_counter()
 
