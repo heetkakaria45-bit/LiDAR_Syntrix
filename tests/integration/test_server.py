@@ -65,7 +65,16 @@ def test_server_endpoints_and_streaming() -> None:
         video_chunk = res.read()
         assert len(video_chunk) > 0
 
-        # 6. Test POST /api/control (step action)
+        # 6. Test GET /api/benchmark
+        conn.request("GET", "/api/benchmark")
+        res = conn.getresponse()
+        assert res.status == 200
+        bench_data = json.loads(res.read().decode("utf-8"))
+        assert "uniform_vs_foveated" in bench_data
+        assert "provenance" in bench_data
+        assert bench_data["uniform_vs_foveated"]["memory_reduction_pct"] > 0.0
+
+        # 7. Test POST /api/control (step action)
         payload = json.dumps({"action": "step"})
         conn.request("POST", "/api/control", body=payload, headers={"Content-Type": "application/json"})
         res = conn.getresponse()

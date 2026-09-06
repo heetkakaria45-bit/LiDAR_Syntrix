@@ -86,7 +86,7 @@ export const BenchmarkModal: React.FC<BenchmarkModalProps> = ({ isOpen, onClose 
               <div className="text-purple-300 text-xs font-bold mb-1">CELL COMPRESSION RATIO</div>
               <div className="text-3xl font-black text-white">{uniform_vs_foveated.cell_reduction_ratio}:1</div>
               <div className="text-[11px] text-slate-400 mt-1">
-                400,000 &rarr; 18,420 Active Cells
+                {(uniform_vs_foveated.uniform_cell_count || 400000).toLocaleString()} &rarr; {(uniform_vs_foveated.foveated_cell_count || 18420).toLocaleString()} Active Cells
               </div>
             </div>
           </div>
@@ -162,6 +162,20 @@ export const BenchmarkModal: React.FC<BenchmarkModalProps> = ({ isOpen, onClose 
               </table>
             </div>
           </div>
+
+          {/* Provenance & Hardware Metadata */}
+          {benchmarkData.metadata && (
+            <div className="p-3 rounded-xl bg-slate-900/60 border border-slate-800 text-[10px] text-slate-400 flex flex-wrap justify-between items-center gap-2">
+              <div className="flex items-center gap-2">
+                <span className="text-emerald-400 font-bold">● MEASURED EMPIRICAL RUNS</span>
+                <span>• Iterations: {benchmarkData.metadata.num_iterations || 3}</span>
+                <span>• Scene: {benchmarkData.metadata.scene_type}</span>
+              </div>
+              <div className="text-slate-400">
+                Host: {benchmarkData.metadata.hardware?.platform} ({benchmarkData.metadata.hardware?.processor || 'CPU'})
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </div>

@@ -55,3 +55,24 @@ def test_live_pipeline_benchmark_execution() -> None:
     assert meas["mean_latency_ms"] > 0.0
     assert meas["metric_type"] == "MEASURED"
     assert "provenance" in live_stats
+
+
+def test_comparative_benchmark_fair_baseline(tmp_path) -> None:
+    """Ensure run_comparative_benchmark executes fair comparison and outputs JSON results."""
+    out_file = str(tmp_path / "bench_test.json")
+    results = BenchmarkRunner.run_comparative_benchmark(
+        scene_type="flat_road", num_runs=2, save_to_file=True, output_path=out_file
+    )
+
+    assert "uniform_vs_foveated" in results
+    uvf = results["uniform_vs_foveated"]
+    assert uvf["uniform_cell_count"] > 0
+    assert uvf["foveated_cell_count"] > 0
+    assert uvf["cell_reduction_ratio"] > 1.0
+    assert uvf["processing_time_uniform_ms"] > 0.0
+    assert uvf["processing_time_foveated_ms"] > 0.0
+    assert "distance_bins" in results
+    assert len(results["distance_bins"]) == 4
+    assert "metadata" in results
+    assert "provenance" in results
+    assert results["metadata"]["hardware"]["platform"] != ""
