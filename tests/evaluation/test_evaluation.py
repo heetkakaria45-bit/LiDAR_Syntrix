@@ -38,3 +38,20 @@ def test_uniform_vs_foveated_benchmark() -> None:
     assert stats["foveated_grid"]["total_cells"] < 1000000
     assert stats["comparison"]["memory_savings_pct"] >= 90.0
     assert stats["comparison"]["cell_count_reduction_factor"] >= 15.0
+    assert "provenance" in stats
+
+
+def test_live_pipeline_benchmark_execution() -> None:
+    """Ensure BenchmarkRunner executes live benchmark and measures runtime stats."""
+    from src.integration.pipeline import PipelineOrchestrator
+
+    orchestrator = PipelineOrchestrator()
+    live_stats = BenchmarkRunner.run_live_pipeline_benchmark(orchestrator, num_frames=2)
+
+    assert "live_measurements" in live_stats
+    meas = live_stats["live_measurements"]
+    assert meas["frames_evaluated"] == 2
+    assert meas["mean_fps"] > 0.0
+    assert meas["mean_latency_ms"] > 0.0
+    assert meas["metric_type"] == "MEASURED"
+    assert "provenance" in live_stats

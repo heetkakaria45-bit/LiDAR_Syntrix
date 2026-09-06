@@ -118,7 +118,12 @@ class ControlCenterHandler(BaseHTTPRequestHandler):
         elif path == "/api/architecture":
             self._send_json(self._get_architecture_info())
         elif path == "/api/benchmark":
-            stats = BenchmarkRunner.compare_uniform_vs_foveated()
+            query_params = parse_qs(parsed_url.query)
+            run_live = query_params.get("live", ["false"])[0].lower() in ("true", "1")
+            if run_live:
+                stats = BenchmarkRunner.run_live_pipeline_benchmark(self.orchestrator, num_frames=5)
+            else:
+                stats = BenchmarkRunner.compare_uniform_vs_foveated()
             self._send_json(stats)
         elif path == "/api/frame":
             self._serve_latest_frame()

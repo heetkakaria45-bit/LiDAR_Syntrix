@@ -10,6 +10,10 @@ Responsibilities:
     - Synthetic geometric test scene generation for deterministic testing
 """
 
+from src.preprocessing.filters import validate_and_sanitize_points
 from src.preprocessing.synthetic import generate_synthetic_scene
 
-__all__ = ["generate_synthetic_scene"]
+__all__ = [
+    "generate_synthetic_scene",
+    "validate_and_sanitize_points",
+]

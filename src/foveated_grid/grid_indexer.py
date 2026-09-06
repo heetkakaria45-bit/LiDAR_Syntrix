@@ -92,27 +92,33 @@ class FoveatedGridIndexer:
     def bin_points(
         self, points: np.ndarray
     ) -> Dict[Tuple[int, int, int], List[int]]:
-        """Vectorized / fast binning of (N, 3) points into multi-resolution cells.
+        """Vectorized spatial hash binning of (N, 3) points into discrete multi-resolution cells.
+
+        This method provides flat tuple-keyed spatial hashing: (level_id, cell_ix, cell_iy) -> point_indices.
+        For hierarchical mapping containers indexed by ring name, use `assign_points()`.
 
         Returns:
             Dictionary mapping (level_id, cell_ix, cell_iy) -> list of point indices.
         """
-        if points.shape[0] == 0:
+        n_points = points.shape[0]
+        if n_points == 0:
             return {}
 
         x = points[:, 0]
         y = points[:, 1]
         distances = np.hypot(x, y)
+        assigned = np.zeros(n_points, dtype=bool)
 
         cell_bins: Dict[Tuple[int, int, int], List[int]] = {}
 
         for ring in self.rings:
-            # Mask points falling into this ring's distance interval
+            # Mask points falling into this ring's distance interval [r_min, r_max)
             if ring.level_id == self.rings[-1].level_id:
-                mask = (distances >= ring.min_range) & (distances <= ring.max_range)
+                mask = (~assigned) & (distances >= ring.min_range) & (distances <= ring.max_range)
             else:
-                mask = (distances >= ring.min_range) & (distances < ring.max_range)
+                mask = (~assigned) & (distances >= ring.min_range) & (distances < ring.max_range)
 
+            assigned |= mask
             indices = np.nonzero(mask)[0]
             if indices.size == 0:
                 continue

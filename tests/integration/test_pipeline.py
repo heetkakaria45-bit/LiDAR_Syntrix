@@ -46,3 +46,17 @@ def test_sequence_player_step() -> None:
 
     assert len(frames_received) == 2
     assert frames_received == [1, 2]
+
+
+def test_pipeline_evaluation_consumption() -> None:
+    """Ensure pipeline automatically computes and attaches evaluation metrics when GT is present."""
+    orchestrator = PipelineOrchestrator(mode=PipelineMode.SYNTHETIC)
+    frame, sem_cloud, sem_map, telemetry = orchestrator.process_frame()
+
+    assert "evaluation" in sem_map.metadata
+    eval_meta = sem_map.metadata["evaluation"]
+    assert "mIoU" in eval_meta
+    assert eval_meta["mIoU"] >= 0.0
+    assert "distance_stratified" in eval_meta
+    assert "evaluation" in telemetry
+    assert telemetry["evaluation"]["metric_type"] == "MEASURED"

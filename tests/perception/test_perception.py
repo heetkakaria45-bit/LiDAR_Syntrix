@@ -24,3 +24,15 @@ def test_mock_semantic_segmenter() -> None:
     assert sem_cloud.semantic_class[1] == 2  # VEHICLE / Obstacle
     assert sem_cloud.semantic_class[2] == 6  # WALL_BUILDING
     assert np.all(sem_cloud.confidence == 0.9)
+
+
+def test_mock_semantic_segmenter_empty_frame() -> None:
+    """Ensure segmenter handles empty frames without crashing."""
+    points = np.zeros((0, 3), dtype=np.float32)
+    frame = PointCloudFrame(points=points, timestamp=100.0, frame_id="lidar")
+    segmenter = MockSemanticSegmenter()
+    sem_cloud = segmenter.infer(frame)
+
+    assert sem_cloud.points.shape == (0, 3)
+    assert sem_cloud.semantic_class.shape == (0,)
+    assert sem_cloud.confidence.shape == (0,)
