@@ -1,243 +1,288 @@
-# Foveated Spatial Grid Module Official Engineering Handoff
+# Foveated Spatial Grid & Indexing Module Official Handoff
+
+> **Module:** `src/foveated_grid/`  
+> **Module Owner:** Manashri (Member 3)  
+> **Branch:** `feature/manashri-foveated-grid`  
+> **Target Integrator:** Vedant (System Integration & Release)  
 
 ---
 
-## SECTION 1 — OWNER
-- **Name:** Manashri
-- **Role:** Foveated Grid & Spatial Indexing Lead (Member 3)
-- **Branch:** `feature/manashri-foveated-grid`
-- **Current HEAD:** `fix(foveated): unify canonical spatial indexer contract`
-- **Commit Hash:** `11053279ca147ccad58fbe1df815607314b1d1e4`
+## 1. CANONICAL INDEXER
+
+The foveated indexing engine defines `CellKey` as a canonical `NamedTuple` subclass, reconciling object-style named attribute access and tuple-style unpacking/indexing with zero overhead.
+
+### CellKey Definition
+```python
+class CellKey(NamedTuple):
+    level: int  # Foveation ring level index (0, 1, 2, 3)
+    i: int      # Discrete X column index (forward axis)
+    j: int      # Discrete Y row index (left axis)
+
+    # Ring/Level Aliases
+    @property
+    def ring_idx(self) -> int: return self.level
+    @property
+    def ring(self) -> int: return self.level
+    @property
+    def level_id(self) -> int: return self.level
+
+    # Discrete 2D Coordinate Aliases
+    @property
+    def cell_x(self) -> int: return self.i
+    @property
+    def cell_y(self) -> int: return self.j
+    @property
+    def x(self) -> int: return self.i
+    @property
+    def y(self) -> int: return self.j
+
+    def to_tuple(self) -> Tuple[int, int, int]:
+        return (self.level, self.i, self.j)
+```
+
+### Usage Example
+```python
+from src.foveated_grid import FoveatedGridIndexer, world_to_cell, cell_to_world
+
+indexer = FoveatedGridIndexer()
+
+# 1. World to Cell
+key = indexer.world_to_cell(5.0, -2.5)
+assert key is not None
+
+# Named attribute access
+print(key.level, key.i, key.j)
+print(key.ring_idx, key.cell_x, key.cell_y)
+
+# Tuple unpacking & indexing
+ring_idx, cx, cy = key
+assert key[0] == 0
+
+# 2. Cell to World Center
+x_center, y_center = indexer.cell_to_world(key)
+# Or using indices: indexer.cell_to_world(key.i, key.j, key.level)
+```
 
 ---
 
-## SECTION 2 — RESPONSIBILITY
+## 2. FOVEATION RINGS
 
-### What this workstream OWNS:
-- Multi-ring variable-resolution spatial indexing (`src/foveated_grid/foveated_indexer.py`, `src/foveated_grid/grid_indexer.py`).
-- Deterministic world-to-cell $(X, Y) \to (i, j, \text{level})$ coordinate quantization and cell-to-world $(i, j, \text{level}) \to (X_c, Y_c)$ center coordinate reconstruction.
-- Half-open radial interval boundary enforcement $[r_k, r_{k+1})$.
-- Sparse hash table data structure and cell accumulation (`SparseFoveatedGrid`, `SparseCell` in `src/foveated_grid/sparse_grid.py`).
-- High-throughput scalar insertion, vectorized batch point assignment (`assign_points()`), and spatial region bounding queries.
-- Handoff conversions to standardized `GridCell` and `SemanticMap` contract instances.
+The system maintains four concentric resolution rings centered on the vehicle ego origin:
 
-### What this workstream DOES NOT own:
-- Point cloud ingestion, sanitization, and range filtering (owned by Amulya, `src/preprocessing/`).
-- 3D semantic perception, feature extraction, and class inferencing (owned by Vedant, `src/perception/`).
-- Elevation aggregation, slope estimation, terrain traversability, and curb/pothole hazard detection (owned by Heet, `src/mapping/`).
-- End-to-end orchestration, UI/dashboard, and WebSockets (owned by Atharva, `src/integration/`, `src/visualization/`).
-- Formal benchmarking suites and mIoU evaluation (owned by Himisha, `src/evaluation/`).
+| Ring Level | Level Name | Distance Band ($r = \sqrt{x^2+y^2}$) | Grid Resolution ($\Delta$) | Coordinate Offset ($x_{\min}, y_{\min}$) | Functional Priority |
+| :---: | :---: | :---: | :---: | :---: | :--- |
+| **Ring 0** | `near` | $[0.0\text{ m}, 10.0\text{ m})$ | **$0.05\text{ m}$ ($5\text{ cm}$)** | $-10.0\text{ m}, -10.0\text{ m}$ | Road hazards, curbs, potholes ($1.0$) |
+| **Ring 1** | `mid_near` | $[10.0\text{ m}, 25.0\text{ m})$ | **$0.10\text{ m}$ ($10\text{ cm}$)** | $-25.0\text{ m}, -25.0\text{ m}$ | Dynamic actors, pedestrians ($0.8$) |
+| **Ring 2** | `mid` | $[25.0\text{ m}, 50.0\text{ m})$ | **$0.25\text{ m}$ ($25\text{ cm}$)** | $-50.0\text{ m}, -50.0\text{ m}$ | Intermediate lane context ($0.5$) |
+| **Ring 3** | `far` | $[50.0\text{ m}, 100.0\text{ m})$ | **$0.50\text{ m}$ ($50\text{ cm}$)** | $-100.0\text{ m}, -100.0\text{ m}$ | Horizon, distant buildings ($0.2$) |
 
----
-
-## SECTION 3 — WHAT WAS IMPLEMENTED
-
-### 1. Canonical `CellKey` (`src/foveated_grid/foveated_indexer.py`)
-- **Status:** ✅ IMPLEMENTED AND VERIFIED
-- **Purpose:** Provide a canonical, hashable, tuple-compatible key for discrete multi-resolution cell identification.
-- **Classes/Functions:** `CellKey(NamedTuple)`
-- **Algorithm:** Inherits from `NamedTuple(level: int, i: int, j: int)` with bit-packing methods (`to_packed_uint64`, `from_packed_uint64`) and property aliases (`.ring_idx`, `.cell_x`, `.cell_y`, `.ring`, `.level_id`, `.x`, `.y`).
-- **Input:** `level: int` ($0\text{--}3$), `i: int` (column index), `j: int` (row index).
-- **Output:** Hashable 3-tuple / NamedTuple instance.
-- **Dependencies:** Pure Python standard library (`typing.NamedTuple`).
-
-### 2. `FoveatedGridIndexer` (`src/foveated_grid/foveated_indexer.py`)
-- **Status:** ✅ IMPLEMENTED AND VERIFIED
-- **Purpose:** Deterministic constant-time $O(1)$ spatial coordinate mapping and vector batch partitioning.
-- **Important Methods:**
-  - `get_level_for_distance(distance: float) -> Optional[FoveationLevelConfig]`
-  - `resolution_for_distance(distance: float) -> Optional[float]`
-  - `world_to_cell(x: float, y: float, level: Optional[int] = None) -> Optional[CellKey]`
-  - `cell_to_world(cell_or_ix, iy=None, level=None) -> Tuple[float, float]`
-  - `world_to_cell_batch(points: np.ndarray) -> Tuple[np.ndarray, np.ndarray]`
-  - `assign_points(points: np.ndarray) -> Dict[str, Dict[Tuple[int, int], Tuple[float, float, np.ndarray]]]`
-- **Algorithm:**
-  - Radial distance $r = \sqrt{x^2 + y^2}$.
-  - Level lookup adhering to half-open interval $[r_k, r_{k+1})$.
-  - Floor quantization with IEEE-754 precision guard: $i = \lfloor \text{round}((x - x_{\min}) / \Delta, 9) \rfloor$, $j = \lfloor \text{round}((y - y_{\min}) / \Delta, 9) \rfloor$, where $x_{\min} = y_{\min} = -r_{\max, k}$.
-  - Center reconstruction: $X_c = x_{\min} + (i + 0.5)\Delta$, $Y_c = y_{\min} + (j + 0.5)\Delta$.
-- **Dependencies:** NumPy, PyYAML.
-- **Configuration:** Ingests `configs/default_config.yaml` (`foveation_levels` section).
-
-### 3. `SparseFoveatedGrid` & `SparseCell` (`src/foveated_grid/sparse_grid.py`)
-- **Status:** ✅ IMPLEMENTED AND VERIFIED
-- **Purpose:** Memory-efficient sparse spatial hash storage allocating only observed cells with zero memory overhead for unobserved regions.
-- **Important Methods:** `insert()`, `insert_batch()`, `query()`, `get_cell_at()`, `query_cell()`, `get()`, `query_region()`, `iter_occupied_cells()`, `to_grid_cells()`, `to_semantic_map()`.
-- **Dependencies:** NumPy, `src/contracts.py`.
-
-### 4. Compatibility Module `grid_indexer.py` (`src/foveated_grid/grid_indexer.py`)
-- **Status:** ✅ IMPLEMENTED AND VERIFIED
-- **Purpose:** Re-exports all canonical classes and functions to guarantee backward compatibility with legacy scripts and tests.
+### Why Half-Open Intervals $[r_k, r_{k+1})$ Are Used
+Half-open intervals guarantee:
+1. **Unambiguous Ring Ownership:** A point at an exact boundary (e.g. $r = 10.000\text{m}$) belongs strictly to Ring 1, never duplicating across Ring 0 and Ring 1.
+2. **Gapless Partitioning:** The domain $[0, 100\text{m})$ is partitioned without spatial holes or overlap regions.
+3. **Origin Invariant:** The sensor origin $(0, 0)$ where $r = 0.0\text{m}$ is deterministically owned by Ring 0 (`near`).
 
 ---
 
-## SECTION 4 — DATA CONTRACT
+## 3. COORDINATE QUANTIZATION
 
-### Input Contract
-- **Datatype:** `np.ndarray` or contract dataclasses (`PointCloudFrame`, `SemanticPointCloud`).
-- **Shape:** $(N, 2)$, $(N, 3)$, or $(N, \ge 3)$.
-- **Dtype:** `float32` or `float64` for points; `int32`/`uint8` for class labels; `float32` for confidences.
-- **Units:** Meters for $(x, y, z)$.
-- **Coordinate Convention:** Right-handed Cartesian ($+X = \text{Forward}$, $+Y = \text{Left}$, $+Z = \text{Up}$).
+### Distance Calculation
+Horizontal Euclidean 2D sensing radius:
+$$r = \sqrt{x^2 + y^2} = \text{hypot}(x, y)$$
 
-### Output Contract
-1. **Spatial Assignments (`assign_points`):**
-   - Datatype: `Dict[str, Dict[Tuple[int, int], Tuple[float, float, np.ndarray]]]`
-   - Mapping: `level_name` (`"near"`, `"mid_near"`, `"mid"`, `"far"`) $\to (i, j) \to (X_c, Y_c, \text{point\_indices\_array})$.
-   - Consumed by: `src/mapping/mapper.py` (`SemanticElevationMapper`).
-2. **Contract Objects (`to_grid_cells`, `to_semantic_map`):**
-   - Datatypes: `List[GridCell]`, `SemanticMap` (conforming to `CONTRACTS.md` and `src/contracts.py`).
-   - Consumed by: `src/mapping/`, `src/integration/`, `src/visualization/`.
+### Coordinate Origin & Bounding Offsets
+Each ring level $k$ defines its physical bounding box spanning $[-r_{\max, k}, +r_{\max, k}]$:
+$$x_{\min, k} = -r_{\max, k}, \quad y_{\min, k} = -r_{\max, k}$$
 
----
+### Floor Quantization Formula
+Continuous coordinates $(x, y)$ map to discrete column/row indices $(i, j)$ via:
+$$i = \left\lfloor \text{round}\left(\frac{x - x_{\min, k}}{\Delta_k}, 9\right) \right\rfloor$$
+$$j = \left\lfloor \text{round}\left(\frac{y - y_{\min, k}}{\Delta_k}, 9\right) \right\rfloor$$
+where $\text{round}(\cdot, 9)$ guards against IEEE-754 float precision boundary truncation (e.g., $10.1 / 0.05 = 201.99999999999997 \to 202$).
 
-## SECTION 5 — FILES CHANGED
+### Negative Coordinate & Quadrant Behavior
+Because $x_{\min, k} = -r_{\max, k} < 0$, the quantity $(x - x_{\min, k}) \ge 0$ is strictly non-negative for all valid points inside the ring bounding box. Discrete cell indices $i, j \ge 0$ remain non-negative unsigned integers across all 4 Cartesian quadrants.
 
-| File | Change Type | Reason |
-| :--- | :---: | :--- |
-| `src/foveated_grid/foveated_indexer.py` | `MODIFIED` | Implemented canonical NamedTuple `CellKey`, flexible calling signatures, and `assign_points()` mapping protocol. |
-| `src/foveated_grid/sparse_grid.py` | `MODIFIED` | Added `get_cell_at()` and `get()` query aliases for flexible query syntax. |
-| `src/foveated_grid/__init__.py` | `MODIFIED` | Standardized canonical and convenience exports. |
-| `src/foveated_grid/grid_indexer.py` | `NEW` | Added backward-compatibility re-export shim. |
-| `tests/foveated_grid/test_canonical_indexer.py` | `NEW` | Added regression test suite verifying canonical interface, four rings, boundary limits, and integration protocol. |
-| `docs/handoffs/foveated_grid_handoff.md` | `NEW` | Added formal module handoff specification. |
+### Boundary Behavior
+- Exact boundary $r = 10.0\text{m} \to \text{Ring } 1$ (`mid_near`).
+- Epsilon inside $r = 10.0 - 10^{-6}\text{m} \to \text{Ring } 0$ (`near`).
+- Maximum sensing limit $r = 100.0\text{m} \to \text{None}$ (out of range).
+- Points beyond $100\text{m}$ or with negative distances return `None` safely.
 
 ---
 
-## SECTION 6 — TESTS
+## 4. SPARSE GRID
 
-### Test Command 1 (Module Suite)
+`SparseFoveatedGrid` provides a sparse hash-map data structure mapping discrete `CellKey` to `SparseCell` containers.
+
+### Storage Model
+- Internal storage: `Dict[CellKey, SparseCell]`.
+- Empty cell overhead: **Zero**. Only cells containing at least one LiDAR observation are allocated in memory.
+
+### Point Insertion & Lookup
+- **Scalar Insertion (`insert(x, y, data)`):** Constant-time $O(1)$ coordinate quantization, instantiating `SparseCell` on first observation or appending payload to existing cell.
+- **Point Query (`query(x, y)` / `get_cell_at(x, y)`):** Looks up occupied cell in $O(1)$ time ($2.02\text{ }\mu\text{s/lookup}$). If unoccupied or out-of-bounds, returns `None` without allocating dummy space.
+- **Key Query (`query_cell(key)` / `get(key)`):** Direct hash table key lookup.
+- **Region Query (`query_region(min_x, max_x, min_y, max_y)`):** Iterates strictly over occupied sparse cells $O(K)$, testing bounding box containment.
+
+### Vectorized Batch Insertion (`insert_batch(points, payloads)`)
+- Accepts NumPy arrays $(N, \ge 2)$ or contract dataclasses (`PointCloudFrame`, `SemanticPointCloud`).
+- Vectorized batch distance computation, ring masking, and coordinate floor quantization via NumPy.
+- Groups point indices into discrete cells via vectorized sorting and unique key splitting at C-speed ($>240\text{k--}318\text{k pts/s}$).
+
+---
+
+## 5. DOWNSTREAM API (MAPPING CONSUMPTION)
+
+`FoveatedGridIndexer.assign_points()` conforms directly to the `GridIndexerProtocol` consumed by Heet's `SemanticElevationMapper` (`src/mapping/mapper.py`):
+
+```python
+def assign_points(
+    self, points: np.ndarray
+) -> Dict[str, Dict[Tuple[int, int], Tuple[float, float, np.ndarray]]]:
+    """Assigns (N, 3) points into discrete spatial cells across foveation rings.
+    
+    Returns:
+        Dict mapping:
+            ring_name ("near", "mid_near", "mid", "far") ->
+                (cell_x, cell_y) ->
+                    (center_x, center_y, point_indices_array)
+    """
+```
+
+### Downstream Consumption Workflow in Mapping:
+```python
+# In src/mapping/mapper.py:
+assignments = foveated_indexer.assign_points(semantic_cloud.points)
+
+for ring_name, cell_dict in assignments.items():
+    for (gx, gy), (center_x, center_y, pt_indices) in cell_dict.items():
+        cell_z = semantic_cloud.points[pt_indices, 2]
+        cell_cls = semantic_cloud.semantic_class[pt_indices]
+        cell_conf = semantic_cloud.confidence[pt_indices]
+        
+        # Aggregate cell elevation, roughness, semantics, and occupancy
+        grid_cell = aggregate_cell(
+            resolution_level=ring_name,
+            cell_x=center_x,
+            cell_y=center_y,
+            points_z=cell_z,
+            classes=cell_cls,
+            confidences=cell_conf,
+            timestamp=semantic_cloud.timestamp,
+        )
+```
+
+---
+
+## 6. TESTS
+
+### Test Command
 ```bash
 .venv\Scripts\pytest -v tests/foveated_grid/
 ```
-- **Result:** 57 passed, 0 failed, 0 errors in 2.05s.
-- **Pass Count:** 57
-- **Fail Count:** 0
-- **Error Count:** 0
 
-### Test Command 2 (Full System Suite)
+### Exact Test Output
+```text
+============================= test session starts =============================
+platform win32 -- Python 3.12.10, pytest-9.1.1, pluggy-1.6.0
+rootdir: C:\Users\manas\OneDrive\Documents\LiDAR_Syntrix
+configfile: pyproject.toml
+collected 57 items
+
+tests\foveated_grid\test_batch_insert.py .......                         [ 12%]
+tests\foveated_grid\test_canonical_indexer.py ........                   [ 26%]
+tests\foveated_grid\test_foveated_indexer.py ..............              [ 50%]
+tests\foveated_grid\test_mapping_integration.py ....                     [ 57%]
+tests\foveated_grid\test_sparse_grid.py ...................              [ 91%]
+tests\foveated_grid\test_stress_validation.py .....                      [100%]
+
+============================= 57 passed in 2.54s ==============================
+```
+
+### Full Repository Verification
 ```bash
 .venv\Scripts\pytest -v
 ```
-- **Result:** 100 passed, 0 failed, 0 errors in 2.11s.
-- **Pass Count:** 100
-- **Fail Count:** 0
-- **Error Count:** 0
+```text
+============================= 100 passed in 2.11s =============================
+```
+
+### Covered Edge Cases & Tests
+- **Tuple Unpacking & Named Attributes:** `test_cell_key_tuple_unpacking`
+- **Ring Boundaries & Epsilon Limits:** `test_resolution_for_distance_exact_boundaries`, `test_ring_boundaries_and_epsilon_transitions`
+- **Four Quadrants & Sign Combinations:** `test_four_quadrants_negative_coordinates`
+- **Sparse Storage & Non-Allocation:** `test_sparse_grid_storage_and_queries`, `test_iter_occupied_cells_non_mutating`
+- **Vectorized Ingestion & Stress:** `test_batch_insert_large_synthetic`, `test_stress_pipeline_100k_points`
+- **Mapping Integration Protocol:** `test_assign_points_protocol`, `test_semantic_point_cloud_to_semantic_map_handoff`
 
 ---
 
-## SECTION 7 — MANUAL VERIFICATION
+## 7. BENCHMARK METHODOLOGY
 
-1. **Benchmark Execution:**
-   ```bash
-   .venv\Scripts\python scripts/benchmark_foveated_grid.py
-   ```
-   - Verified that 5-trial median benchmarks execute cleanly across 10k, 50k, and 100k point workloads with zero exceptions.
-2. **Synthetic Integration Run:**
-   - Ingested deterministic synthetic curb ($0.15\text{m}$ step) and pothole ($-0.08\text{m}$ depression) scenes via `ingest_point_cloud()`.
-   - Verified that near-field resolution ($0.05\text{m}$) correctly resolves curb boundaries into discrete contiguous cell bands.
+> [!NOTE]
+> The cell-count reduction figures reported below represent a **module-level geometric storage benchmark** based on spatial grid discretization.
+> **The final project-wide baseline definition must be locked during integration.**
 
----
+### Spatial Domain & Envelope Definitions
+1. **Uniform Baseline Grid ($5\text{ cm}$ Uniform Resolution):**
+   - **Square Bounding Domain ($200\text{m} \times 200\text{m}$):**
+     $$\text{Cells}_{\text{square}} = \left(\frac{200}{0.05}\right)^2 = 4000 \times 4000 = 16,000,000\text{ cells}$$
+   - **Radial Disk Envelope ($R = 100\text{m}$):**
+     $$\text{Cells}_{\text{radial}} = \frac{\pi \times (100.0)^2}{0.05^2} \approx 12,566,371\text{ cells}$$
 
-## SECTION 8 — BENCHMARKS / NUMERIC CLAIMS
+2. **Foveated Rings Grid ($5 / 10 / 25 / 50\text{ cm}$):**
+   - **Bounding Square Domains:**
+     $$\text{Ring 0: } \left(\frac{20}{0.05}\right)^2 = 160,000\text{ cells}$$
+     $$\text{Ring 1: } \left(\frac{50}{0.10}\right)^2 - \left(\frac{20}{0.10}\right)^2 = 250,000 - 40,000 = 210,000\text{ cells}$$
+     $$\text{Ring 2: } \left(\frac{100}{0.25}\right)^2 - \left(\frac{50}{0.25}\right)^2 = 160,000 - 40,000 = 120,000\text{ cells}$$
+     $$\text{Ring 3: } \left(\frac{200}{0.50}\right)^2 - \left(\frac{100}{0.50}\right)^2 = 160,000 - 40,000 = 120,000\text{ cells}$$
+     $$\text{Total Square Foveated Cells} = 730,000\text{ cells (}\mathbf{95.44\%}\text{ reduction vs 16.0M uniform square)}$$
+   - **Radial Concentric Annuli Domains:**
+     $$\text{Ring 0 } [0, 10\text{m}): \frac{\pi (10^2 - 0^2)}{0.05^2} \approx 125,664\text{ cells}$$
+     $$\text{Ring 1 } [10, 25\text{m}): \frac{\pi (25^2 - 10^2)}{0.10^2} \approx 164,934\text{ cells}$$
+     $$\text{Ring 2 } [25, 50\text{m}): \frac{\pi (50^2 - 25^2)}{0.25^2} \approx 94,248\text{ cells}$$
+     $$\text{Ring 3 } [50, 100\text{m}): \frac{\pi (100^2 - 50^2)}{0.50^2} \approx 94,248\text{ cells}$$
+     $$\text{Total Radial Foveated Cells} = 479,094\text{ cells (}\mathbf{96.19\%}\text{ reduction vs 12.57M uniform radial)}$$
 
-### Metric 1: Module-Level Geometric Storage Reduction
-- **Value:** $96.19\%$ (concentric annuli vs uniform circular baseline) / $95.44\%$ (bounding squares vs uniform square baseline).
-- **What it measures:** Theoretical cell capacity reduction of foveated resolution bands compared to a dense $0.05\text{m}$ uniform grid.
-- **Classification:** **CALCULATED** (Geometric analysis).
-- **Calculation:**
-  - Uniform $0.05\text{m}$ circle ($R = 100\text{m}$): $\frac{\pi \times 100^2}{0.05^2} = 12,566,371\text{ cells}$.
-  - Foveated annuli: $125,664 + 164,934 + 94,248 + 94,248 = 479,094\text{ cells}$.
-  - Reduction: $1.0 - (479,094 / 12,566,371) = 96.1875\%$.
-- **Note:** This is a module-level geometric reduction benchmark and NOT the final end-to-end system benchmark.
-
-### Metric 2: Batch Insertion Throughput
-- **Values:**
-  - 10,000 points: $318,354\text{ pts/s}$ ($31.41\text{ ms}$)
-  - 50,000 points: $269,460\text{ pts/s}$ ($185.56\text{ ms}$)
-  - 100,000 points: $241,571\text{ pts/s}$ ($413.96\text{ ms}$)
-- **What it measures:** Vectorized batch point ingestion and sparse cell assignment rate.
-- **Classification:** **MEASURED**.
-- **Hardware:** Intel64 Family 6 Model 189 Stepping 1, Windows 11, Python 3.12.10.
-- **Measurement Method:** Median wall-clock time over 5 trials using `time.perf_counter()`.
-
-### Metric 3: Point Query Lookup Rate
-- **Value:** $493,869\text{ lookups/s}$ ($2.02\text{ }\mu\text{s/lookup}$).
-- **What it measures:** Point-to-cell spatial hash lookup speed.
-- **Classification:** **MEASURED**.
+### Hardware & Execution Environment
+- **Platform:** Intel64 Family 6 Model 189 Stepping 1, Windows 11, Python 3.12.10.
+- **Timing:** `time.perf_counter()`, median over 5 trials.
+- **Measured Throughput:**
+  - 10k points: $318,354\text{ pts/s}$ ($31.41\text{ ms}$)
+  - 50k points: $269,460\text{ pts/s}$ ($185.56\text{ ms}$)
+  - 100k points: $241,571\text{ pts/s}$ ($413.96\text{ ms}$)
+  - Point lookup rate: $493,869\text{ lookups/s}$
 
 ---
 
-## SECTION 9 — KNOWN LIMITATIONS
+## 8. COMPATIBILITY & RECOMMENDED IMPORTS
 
-1. **Horizontal 2D Radial Metric:** Foveation ring lookup calculates $r = \sqrt{x^2 + y^2}$, assuming points are in the horizontal ground plane frame.
-2. **Ego Frame Alignment:** Rings are centered on coordinate origin $(0, 0)$. In dynamic vehicle motion, world point clouds must be transformed to ego base frame prior to insertion, or transformed via `sensor_pose`.
-3. **Artifact Dependency:** `outputs/grid_benchmark_results.json` is a generated offline profiling artifact, **not** a required runtime dependency.
+### Recommended Imports for Downstream Modules
+```python
+# Canonical Primary Imports
+from src.foveated_grid import (
+    CellKey,
+    FoveatedGridIndexer,
+    FoveationLevelConfig,
+    SparseCell,
+    SparseFoveatedGrid,
+    assign_points,
+    cell_to_world,
+    get_level_for_distance,
+    load_foveation_config,
+    resolution_for_distance,
+    world_to_cell,
+)
+```
 
----
-
-## SECTION 10 — INTEGRATION REQUIREMENTS
-
-- **Upstream Dependency:** Receives `PointCloudFrame` from Amulya (`src/preprocessing/`) or `SemanticPointCloud` from Vedant (`src/perception/`).
-- **Downstream Consumer:** Consumed by Heet (`src/mapping/mapper.py`) via `assign_points(points)` or `grid.to_semantic_map()`.
-- **Expected Data Format:** Points as NumPy array $(N, 3)$ with $(X=\text{fwd}, Y=\text{left}, Z=\text{up})$ in meters.
-- **Configuration:** Reads `configs/default_config.yaml` or accepts programmatic `FoveationLevelConfig` overrides.
-- **Dependencies:** Only core lightweight dependencies (`numpy`, `pyyaml`).
-
----
-
-## SECTION 11 — MERGE RISKS
-
-- **Merge Conflicts:** None anticipated. No files outside `src/foveated_grid/` and `tests/foveated_grid/` were modified.
-- **API Assumptions:** `CellKey` supports both named attributes and tuple unpacking `(level, i, j)` / `(ring_idx, cell_x, cell_y)`.
-- **Backward Compatibility:** `src/foveated_grid/grid_indexer.py` re-exports all canonical symbols.
-
----
-
-## SECTION 12 — HOW TO VERIFY AFTER MERGE
-
-1. Activate virtual environment:
-   ```bash
-   .venv\Scripts\activate
-   ```
-2. Run the foveated grid test suite:
-   ```bash
-   pytest -v tests/foveated_grid/
-   ```
-   *Expected result: 57 passed.*
-3. Run the full repository test suite:
-   ```bash
-   pytest -v
-   ```
-   *Expected result: 100 passed.*
-4. Run the foveated benchmark script:
-   ```bash
-   python scripts/benchmark_foveated_grid.py
-   ```
-   *Expected result: Benchmark prints theoretical reduction and throughput table cleanly.*
+### Backward Compatibility Module
+If any legacy script or external test imports `src.foveated_grid.grid_indexer`, the new `grid_indexer.py` compatibility layer automatically re-exports all canonical classes and functions without breaking.
 
 ---
 
-## SECTION 13 — DEFINITION OF DONE
+## FINAL SUMMARY
 
-- **Status:** **COMPLETE**
-- **Justification:**
-  - One canonical indexer interface with 100% tuple and attribute compatibility.
-  - All 14 previous failures legitimately resolved.
-  - 57/57 foveated grid tests and 100/100 repository tests pass deterministically.
-  - Four rings, epsilon boundaries, origin, negative coordinates, and out-of-range behaviors verified.
-  - Sparse representation preserved with zero memory overhead for empty space.
-  - Mapping protocol integration verified.
-  - Zero modifications to other team members' modules.
-
----
-
-## SECTION 14 — FINAL HANDOFF MESSAGE
-
-**READY FOR MERGE:** **YES**
-
-**REQUIRED FOLLOW-UP:**
-- Vedant can merge `feature/manashri-foveated-grid` into the main integration pipeline branch.
-- Downstream `src/mapping/mapper.py` can directly consume `assign_points()` with zero adapter mismatch.
-
-**COMMIT:** `11053279ca147ccad58fbe1df815607314b1d1e4`
+- **Status:** **COMPLETE & VERIFIED**
+- **Ready for Merge:** **YES**
+- **Commit Hash:** `098bcb758d9e6074213d2f9547d7c672b14352be`
