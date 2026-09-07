@@ -350,8 +350,8 @@ def test_benchmark_functionality() -> None:
     indexer = FoveatedGridIndexer()
     theo = calculate_theoretical_metrics(indexer)
     assert theo["uniform_square_cells"] == 16000000
-    assert theo["total_foveated_square_cells"] == 730000
-    assert theo["square_reduction_pct"] > 95.0
+    assert theo["total_foveated_square_cells"] == 820000
+    assert theo["square_reduction_pct"] > 94.0
 
     workload = generate_synthetic_workload(50, seed=42)
     assert len(workload) == 50

@@ -37,7 +37,7 @@ def test_foveation_levels(loaded_config):
     expected_levels = [
         {"key": "level_0", "name": "near", "max_range": 10.0, "resolution": 0.05},
         {"key": "level_1", "name": "mid_near", "max_range": 25.0, "resolution": 0.10},
-        {"key": "level_2", "name": "mid", "max_range": 50.0, "resolution": 0.25},
+        {"key": "level_2", "name": "mid", "max_range": 50.0, "resolution": 0.20},
         {"key": "level_3", "name": "far", "max_range": 100.0, "resolution": 0.50},
     ]
 

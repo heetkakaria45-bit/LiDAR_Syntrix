@@ -255,7 +255,7 @@ class FoveatedGridIndexer:
             distance: Horizontal radial distance r = sqrt(x^2 + y^2) in meters.
 
         Returns:
-            Cell resolution in meters (e.g. 0.05, 0.10, 0.25, 0.50),
+            Cell resolution in meters (e.g. 0.05, 0.10, 0.20, 0.50),
             or None if distance is out of range [0.0, max_radius).
         """
         lvl = self.get_level_for_distance(distance)

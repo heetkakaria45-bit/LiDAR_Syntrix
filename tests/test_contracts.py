@@ -146,7 +146,7 @@ def test_semantic_map_creation() -> None:
     pose = np.eye(4, dtype=np.float64)
     sem_map = SemanticMap(
         cells={},
-        resolution_levels={"near": 0.05, "mid": 0.25},
+        resolution_levels={"near": 0.05, "mid": 0.20},
         sensor_pose=pose,
         timestamp=200.0,
         metadata={"num_cells": 0},

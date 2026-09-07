@@ -50,11 +50,11 @@ class SimpleFoveatedGridAdapter:
     def __init__(self, config: Optional[MappingConfig] = None) -> None:
         self.config = config or MappingConfig()
         # Default ring boundaries:
-        # near: 0-10m (5cm), mid_near: 10-25m (10cm), mid: 25-50m (25cm), far: 50-100m (50cm)
+        # near: 0-10m (5cm), mid_near: 10-25m (10cm), mid: 25-50m (20cm), far: 50-100m (50cm)
         self.rings = [
             ("near", 0.0, 10.0, self.config.foveation_resolutions.get("near", 0.05)),
             ("mid_near", 10.0, 25.0, self.config.foveation_resolutions.get("mid_near", 0.10)),
-            ("mid", 25.0, 50.0, self.config.foveation_resolutions.get("mid", 0.25)),
+            ("mid", 25.0, 50.0, self.config.foveation_resolutions.get("mid", 0.20)),
             ("far", 50.0, 100.0, self.config.foveation_resolutions.get("far", 0.50)),
         ]
 

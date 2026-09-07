@@ -29,7 +29,7 @@ class FoveationConfig:
     levels: List[FoveationLevelConfig] = field(default_factory=lambda: [
         FoveationLevelConfig(0, 0.0, 10.0, 0.05, "Immediate proximity zone (ultra-high fidelity)"),
         FoveationLevelConfig(1, 10.0, 25.0, 0.10, "Short-range reaction zone (high fidelity)"),
-        FoveationLevelConfig(2, 25.0, 50.0, 0.25, "Medium-range planning zone (standard fidelity)"),
+        FoveationLevelConfig(2, 25.0, 50.0, 0.20, "Medium-range planning zone (standard fidelity)"),
         FoveationLevelConfig(3, 50.0, 100.0, 0.50, "Long-range situational awareness zone (coarse fidelity)"),
     ])
     adaptive_refinement_enabled: bool = False

@@ -18,7 +18,7 @@ def test_foveation_ring_ranges() -> None:
 
     # Level 2: 25-50m
     r2 = indexer.get_ring_for_distance(30.0)
-    assert r2 is not None and r2.level_id == 2 and r2.resolution == 0.25
+    assert r2 is not None and r2.level_id == 2 and r2.resolution == 0.20
 
     # Level 3: 50-100m
     r3 = indexer.get_ring_for_distance(75.0)

@@ -42,6 +42,8 @@ export const App: React.FC = () => {
     distanceTraveled: 0,
     throttlePct: 0,
     brakePct: 0,
+    isReverse: false,
+    laneX: 0.0,
     eStop: false,
   };
 
@@ -74,6 +76,8 @@ export const App: React.FC = () => {
   const [isConnected, setIsConnected] = useState<boolean>(false);
   const [currentFrameIndex, setCurrentFrameIndex] = useState<number>(1);
   const [totalFrames, setTotalFrames] = useState<number>(500);
+  const [trafficDensity, setTrafficDensity] = useState<number>(5);
+  const [trafficSpeed, setTrafficSpeed] = useState<number>(1.0);
 
   // Drawer Toggles for Uncluttered Professional Viewport
   const [showLeftDrawer, setShowLeftDrawer] = useState<boolean>(false);
@@ -106,22 +110,33 @@ export const App: React.FC = () => {
       const dt = 0.05 * playbackSpeed;
       let newSpeed = cur.speed;
 
-      if (cur.eStop || cur.brakePct > 50) {
-        newSpeed = Math.max(0, newSpeed - 12.0 * dt);
-      } else if (cur.throttlePct > 0) {
+      if (cur.isCollided) {
+        newSpeed = 0;
+      } else if (cur.eStop || cur.brakePct > 50) {
+        if (newSpeed > 0) newSpeed = Math.max(0, newSpeed - 14.0 * dt);
+        else if (newSpeed < 0) newSpeed = Math.min(0, newSpeed + 14.0 * dt);
+      } else if (cur.isReverse || cur.targetSpeedKmh < 0) {
+        // Reverse drive mode (Key S)
+        const target = (cur.targetSpeedKmh || -18) / 3.6;
+        if (newSpeed > target) newSpeed = Math.max(target, newSpeed - 5.5 * dt);
+        else if (newSpeed < target) newSpeed = Math.min(target, newSpeed + 3.5 * dt);
+      } else if (cur.throttlePct > 0 || cur.targetSpeedKmh > 0) {
+        // Forward drive mode (Key W)
         const target = (cur.targetSpeedKmh || 35) / 3.6;
         if (newSpeed < target) newSpeed = Math.min(target, newSpeed + 4.5 * dt);
         else if (newSpeed > target) newSpeed = Math.max(target, newSpeed - 3.0 * dt);
       } else {
         // When not operated by WASD/controls, quickly decelerate to complete standstill
-        newSpeed = Math.max(0, newSpeed - 8.0 * dt);
+        if (newSpeed > 0) newSpeed = Math.max(0, newSpeed - 8.0 * dt);
+        else if (newSpeed < 0) newSpeed = Math.min(0, newSpeed + 8.0 * dt);
       }
 
-      const dist = cur.distanceTraveled + Math.abs(newSpeed * dt);
+      // Reverse decreases distanceTraveled, forward increases it
+      const dist = Math.max(0, cur.distanceTraveled + newSpeed * dt);
       const updated: TeleopState = {
         ...cur,
         speed: newSpeed,
-        speedKmh: Math.abs(newSpeed * 3.6),
+        speedKmh: newSpeed * 3.6,
         distanceTraveled: dist,
       };
 
@@ -189,7 +204,10 @@ export const App: React.FC = () => {
       steerAngle: 0,
       throttlePct: 0,
       brakePct: 0,
+      isReverse: false,
+      laneX: 0.0,
       eStop: false,
+      isCollided: false,
     }));
     fetchNextFrame();
   };
@@ -313,6 +331,11 @@ export const App: React.FC = () => {
             visibleClasses={visibleClasses}
             onOpenResolution={() => setIsResolutionOpen(true)}
             teleop={teleop}
+            onUpdateTeleop={updateTeleop}
+            trafficDensity={trafficDensity}
+            onTrafficDensityChange={setTrafficDensity}
+            trafficSpeed={trafficSpeed}
+            onTrafficSpeedChange={setTrafficSpeed}
           />
 
           {/* Floating Compact Teleoperation Cockpit */}
@@ -352,6 +375,10 @@ export const App: React.FC = () => {
                   onColorModeChange={setColorMode}
                   telemetry={frame?.telemetry || null}
                   onOpenResolution={() => setIsResolutionOpen(true)}
+                  trafficDensity={trafficDensity}
+                  onTrafficDensityChange={setTrafficDensity}
+                  trafficSpeed={trafficSpeed}
+                  onTrafficSpeedChange={setTrafficSpeed}
                 />
               </div>
             </div>

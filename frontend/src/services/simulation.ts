@@ -53,11 +53,14 @@ export class SimulationEngine {
     const hazards: HazardItem[] = [];
     const cells: Record<string, GridCellData> = {};
 
-    // Generate Infinite Procedural Urban Environment, Traffic, Potholes & Dynamic Actors
-    this.populateInfiniteWorld(t, currentDist, points, classes, intensity, boundingBoxes, hazards);
+    // Generate Infinite Procedural Urban Environment, Traffic & Dynamic Actors (Simulated Physical World)
+    this.populateInfiniteWorld(t, currentDist, points, classes, intensity, boundingBoxes, teleop);
 
-    // Compute Foveated Multi-Ring 2.5D Elevation & Semantic Grid
+    // Compute Foveated Multi-Ring 2.5D Elevation & Semantic Grid (Simulated Perception & Grid Mapping)
     this.aggregateFoveatedGrid(points, classes, cells);
+
+    // Detect Hazards strictly from the 2.5D Elevation Grid Cells (Observation Pipeline)
+    this.detectHazardsFromFoveatedGrid(cells, hazards);
 
     // Hazard metrics
     const curbCount = hazards.filter((h) => h.type === 'curb').length;
@@ -125,56 +128,71 @@ export class SimulationEngine {
     classes: number[],
     intensity: number[],
     boxes: BoundingBox[],
-    hazards: HazardItem[]
+    teleop?: TeleopState
   ) {
     const numPoints = 9200;
     const roadWidth = 9.0;
     const curbHeight = 0.16;
 
-    // Periodic road feature cycles
-    const crosswalkSpacing = 65.0;
-    const crosswalkRelX = ((crosswalkSpacing - (distTraveled % crosswalkSpacing)) % crosswalkSpacing);
+    const chunkLength = 120.0;
+    const chunkOffset = distTraveled % chunkLength;
 
-    const busStopSpacing = 85.0;
-    const busStopRelX = ((busStopSpacing - (distTraveled % busStopSpacing)) % busStopSpacing);
-
-    // Multiple Potholes along the road (placed at distinct relative offsets)
-    const potholeConfigs = [
-      { baseDist: 25.0, laneY: 1.6, depth: 0.14, radius: 1.1 },
-      { baseDist: 55.0, laneY: -1.8, depth: 0.12, radius: 0.9 },
-      { baseDist: 90.0, laneY: 0.8, depth: 0.15, radius: 1.2 },
+    // 1. Synchronized Active Potholes (from 120m chunk layout)
+    // In ThreeJS: Z = -15.0, -42.0, +25.0. X = -1.6, +1.8, -0.8.
+    // In Canonical: X_fwd = -(Z + chunkOffset + chunkZ), Y_left = -X.
+    const potholeDefs = [
+      { x: -1.6, z: -15.0, r: 1.1, depth: 0.14, id: 'ph-1' },
+      { x: 1.8, z: -42.0, r: 0.9, depth: 0.12, id: 'ph-2' },
+      { x: -0.8, z: 25.0, r: 1.2, depth: 0.15, id: 'ph-3' },
     ];
-
-    const activePotholes = potholeConfigs.map((cfg, idx) => {
-      const cycle = 80.0;
-      const relX = ((cfg.baseDist + cycle - (distTraveled % cycle)) % cycle);
-      return {
-        id: `hz-pothole-${idx + 1}`,
-        relX,
-        y: cfg.laneY,
-        depth: cfg.depth,
-        radius: cfg.radius,
-      };
+    const activePotholes: Array<{ x: number; y: number; r: number; depth: number; id: string }> = [];
+    [-120.0, 0.0, 120.0].forEach((chunkZ) => {
+      potholeDefs.forEach((ph) => {
+        const relXFwd = -(ph.z + chunkZ + chunkOffset);
+        const relYLeft = -ph.x;
+        if (relXFwd >= -25 && relXFwd <= 95) {
+          activePotholes.push({
+            x: relXFwd,
+            y: relYLeft,
+            r: ph.r,
+            depth: ph.depth,
+            id: `${ph.id}-${Math.round(relXFwd)}`,
+          });
+        }
+      });
     });
 
-    // Speed Breakers along the road (placed periodically every 45m)
-    const speedBreakerConfigs = [
-      { baseDist: 15.0, height: 0.08, width: 1.8 },
-      { baseDist: 60.0, height: 0.08, width: 1.8 },
+    // 2. Synchronized Active Speed Breakers (from 120m chunk layout)
+    // In ThreeJS: Z = -32.0, +32.0, X = 0.0.
+    const sbDefs = [
+      { z: -32.0, height: 0.08, width: 1.8, id: 'sb-1' },
+      { z: 32.0, height: 0.08, width: 1.8, id: 'sb-2' },
     ];
-
-    const activeSpeedBreakers = speedBreakerConfigs.map((cfg, idx) => {
-      const cycle = 90.0;
-      const relX = ((cfg.baseDist + cycle - (distTraveled % cycle)) % cycle);
-      return {
-        id: `hz-speedbreaker-${idx + 1}`,
-        relX,
-        height: cfg.height,
-        width: cfg.width,
-      };
+    const activeSpeedBreakers: Array<{ x: number; height: number; width: number; id: string }> = [];
+    [-120.0, 0.0, 120.0].forEach((chunkZ) => {
+      sbDefs.forEach((sb) => {
+        const relXFwd = -(sb.z + chunkZ + chunkOffset);
+        if (relXFwd >= -25 && relXFwd <= 95) {
+          activeSpeedBreakers.push({
+            x: relXFwd,
+            height: sb.height,
+            width: sb.width,
+            id: `${sb.id}-${Math.round(relXFwd)}`,
+          });
+        }
+      });
     });
 
-    // 1. Drivable Road Surface, Sidewalks, Pothole Depressions & Speed Breakers
+    // 3. Zebra Crosswalks (from 120m chunk layout at Z = -18.0)
+    const activeCrosswalks: number[] = [];
+    [-120.0, 0.0, 120.0].forEach((chunkZ) => {
+      const relXFwd = -(-18.0 + chunkZ + chunkOffset);
+      if (relXFwd >= -25 && relXFwd <= 95) {
+        activeCrosswalks.push(relXFwd);
+      }
+    });
+
+    // 4. Drivable Road Surface, Sidewalks, Pothole Depressions & Speed Breakers
     for (let i = 0; i < numPoints * 0.42; i++) {
       const r = Math.pow(Math.random(), 1.5) * 85.0 + 0.5;
       const angle = (Math.random() - 0.5) * Math.PI * 1.9;
@@ -191,29 +209,34 @@ export class SimulationEngine {
         intens = 0.6;
 
         // Zebra Crossing reflectance
-        if (Math.abs(x - crosswalkRelX) < 2.0) {
-          const stripe = Math.abs((y + 4.5) % 1.0);
-          if (stripe < 0.55) intens = 0.98;
+        for (const cwX of activeCrosswalks) {
+          if (Math.abs(x - cwX) < 2.0) {
+            const stripe = Math.abs((y + 4.5) % 1.0);
+            if (stripe < 0.55) intens = 0.98;
+          }
         }
 
-        // Check if point falls inside any active pothole
+        // Pothole Crater Physics: grazing angle shadow & depth
         for (const ph of activePotholes) {
-          const distToHole = Math.hypot(x - ph.relX, y - ph.y);
-          if (distToHole < ph.radius) {
-            const depression = Math.max(0, (ph.radius - distToHole) * (ph.depth / ph.radius));
-            z -= depression;
-            intens = 0.15; // Darker asphalt reflectance in crater
+          const distToHole = Math.hypot(x - ph.x, y - ph.y);
+          if (distToHole < ph.r) {
+            const baseDepression = Math.max(0, (ph.r - distToHole) * (ph.depth / ph.r));
+            // Grazing angle line-of-sight from roof sensor (Z = 1.45m):
+            const distFromSensor = Math.max(1.0, Math.hypot(x, y));
+            const maxVisibleDepth = Math.min(ph.depth, (1.45 * ph.r) / Math.max(2.0, distFromSensor - ph.r));
+            const actualDepression = Math.min(baseDepression, maxVisibleDepth);
+            z -= actualDepression;
+            intens = 0.15; // Dark asphalt reflectance in crater
             break;
           }
         }
 
-        // Check if point falls on an elevated speed breaker hump
+        // Speed Breaker Elevation Hump
         for (const sb of activeSpeedBreakers) {
-          const dx = Math.abs(x - sb.relX);
+          const dx = Math.abs(x - sb.x);
           if (dx < sb.width / 2) {
             const hump = sb.height * Math.max(0, 1 - Math.pow(dx / (sb.width / 2), 2));
             z += hump;
-            // High-visibility yellow/black stripe reflectance
             const stripe = Math.abs((y + 4.5) % 0.8);
             if (stripe < 0.4) intens = 0.96;
             break;
@@ -235,206 +258,217 @@ export class SimulationEngine {
       intensity.push(intens);
     }
 
-    // 2. Register Active Pothole & Speed Breaker Hazards for Detection & HUD
-    activePotholes.forEach((ph) => {
-      if (ph.relX > 1.5 && ph.relX < 60.0) {
-        hazards.push({
-          id: ph.id,
-          type: 'pothole',
-          x: Number(ph.relX.toFixed(2)),
-          y: ph.y,
-          z: -ph.depth,
-          severity: Number((ph.depth / 0.15).toFixed(2)),
-          depth: ph.depth,
-          details: `Road depression (-${Math.round(ph.depth * 100)}cm) detected in lane`,
+    // 5. Buildings from 120m Chunk Layout (1:1 with ThreeJS Scene)
+    const buildingConfigs = [
+      { threeX: 17.5, threeZ: -35, dx: 15, dy: 14, dz: 28, name: 'OFFICE COMPLEX (EAST)' },
+      { threeX: 16.5, threeZ: 15, dx: 13, dy: 10, dz: 24, name: 'COMMERCIAL PLAZA (EAST)' },
+      { threeX: -17.5, threeZ: -40, dx: 15, dy: 16, dz: 30, name: 'TECH TOWER (WEST)' },
+      { threeX: -16.5, threeZ: 20, dx: 13, dy: 11, dz: 26, name: 'RESIDENTIAL COMPLEX (WEST)' },
+    ];
+    [-120.0, 0.0, 120.0].forEach((chunkZ) => {
+      buildingConfigs.forEach((b, bIdx) => {
+        const bx = -(b.threeZ + chunkZ + chunkOffset);
+        const by = -b.threeX;
+        const bz = b.dy / 2 + 0.16;
+        if (bx >= -35 && bx <= 95) {
+          this.generateBoxPoints(points, classes, intensity, bx, by, bz, b.dz, b.dx, b.dy, 6, 240);
+          boxes.push({
+            id: `bldg-${Math.round(chunkZ)}-${bIdx}`,
+            classId: 6,
+            className: b.name,
+            center: [bx, by, bz],
+            size: [b.dz, b.dx, b.dy],
+            rotation: 0,
+            confidence: 0.99,
+            velocity: [0, 0, 0],
+          });
+        }
+      });
+    });
+
+    // 6. Crosswalk Pedestrian with Dynamic Motion (1:1 with Zebra Crosswalk at Z = -18.0)
+    [-120.0, 0.0, 120.0].forEach((chunkZ) => {
+      const cwX = -(-18.0 + chunkZ + chunkOffset);
+      if (cwX >= -25 && cwX <= 95) {
+        const pedWalkProgress = (t * 0.08) % 1.0;
+        const pedThreeX = -3.8 + pedWalkProgress * 7.6;
+        const pedY = -pedThreeX;
+
+        this.generateCylinderPoints(points, classes, intensity, cwX, pedY, 1.035, 0.32, 1.75, 3, 160);
+        boxes.push({
+          id: `ped-crosswalk-${Math.round(cwX)}`,
+          classId: 3,
+          className: 'PEDESTRIAN (CROSSING)',
+          center: [cwX, pedY, 1.035],
+          size: [0.6, 0.6, 1.75],
+          rotation: Math.PI / 2,
+          confidence: 0.98,
+          velocity: [0, 0.6, 0],
         });
+      }
+    });
+
+    // 7. Dynamic Traffic Fleet Ray Sampling (1:1 with Traffic Fleet)
+    if (teleop?.trafficActors && teleop.trafficActors.length > 0) {
+      teleop.trafficActors.forEach((car) => {
+        if (!car.visible) return;
+        const carXFwd = -car.z;
+        const carYLeft = -car.x;
+        if (carXFwd < -25 || carXFwd > 85) return;
+
+        const isLeading = car.type === 'leading';
+        const length = isLeading ? 5.1 : 4.6;
+        const width = isLeading ? 2.1 : 1.9;
+        const height = isLeading ? 1.8 : 1.45;
+        const pointDensity = isLeading ? 280 : 260;
+
+        this.generateBoxPoints(
+          points,
+          classes,
+          intensity,
+          carXFwd,
+          carYLeft,
+          height / 2,
+          length,
+          width,
+          height,
+          2,
+          pointDensity
+        );
 
         boxes.push({
-          id: `box-${ph.id}`,
-          classId: 7, // hazard marker
-          className: `POTHOLE (-${Math.round(ph.depth * 100)}cm)`,
-          center: [ph.relX, ph.y, -ph.depth / 2],
-          size: [ph.radius * 2, ph.radius * 2, ph.depth + 0.1],
+          id: car.id,
+          classId: 2,
+          className: isLeading ? 'SUV (LEADING)' : 'SEDAN (ONCOMING)',
+          center: [carXFwd, carYLeft, height / 2],
+          size: [length, width, height],
+          rotation: isLeading ? 0 : Math.PI,
+          confidence: 0.97,
+          velocity: [isLeading ? car.speed : -car.speed, 0, 0],
+        });
+      });
+    } else {
+      // Fallback traffic if teleop actors not provided
+      const defaultTraffic = [
+        { id: 'lead-1', x: -2.4, z: -16.0 - ((t * 2.5) % 70), isLeading: true },
+        { id: 'oncoming-1', x: 2.4, z: -80.0 + ((t * 4.0) % 110), isLeading: false },
+      ];
+      defaultTraffic.forEach((car) => {
+        const carXFwd = -car.z;
+        const carYLeft = -car.x;
+        if (carXFwd < -25 || carXFwd > 85) return;
+        const length = car.isLeading ? 5.1 : 4.6;
+        const width = car.isLeading ? 2.1 : 1.9;
+        const height = car.isLeading ? 1.8 : 1.45;
+        this.generateBoxPoints(points, classes, intensity, carXFwd, carYLeft, height / 2, length, width, height, 2, 260);
+        boxes.push({
+          id: car.id,
+          classId: 2,
+          className: car.isLeading ? 'SUV (LEADING)' : 'SEDAN (ONCOMING)',
+          center: [carXFwd, carYLeft, height / 2],
+          size: [length, width, height],
+          rotation: car.isLeading ? 0 : Math.PI,
+          confidence: 0.97,
+          velocity: [car.isLeading ? 3.0 : -3.5, 0, 0],
+        });
+      });
+    }
+
+    // 8. Wildlife Deer near roadside terrain (1:1 with ThreeJS Scene at Z = -32.0, X = 8.5)
+    [-120.0, 0.0, 120.0].forEach((chunkZ) => {
+      const deerX = -(-32.0 + chunkZ + chunkOffset);
+      const deerY = -8.5;
+      if (deerX >= -25 && deerX <= 95) {
+        this.generateBoxPoints(points, classes, intensity, deerX, deerY, 0.9, 1.6, 0.6, 1.0, 3, 120);
+        this.generateCylinderPoints(points, classes, intensity, deerX + 0.7, deerY, 1.3, 0.2, 0.7, 3, 50);
+        boxes.push({
+          id: `creature-deer-${Math.round(deerX)}`,
+          classId: 3,
+          className: 'WILDLIFE (DEER)',
+          center: [deerX, deerY, 0.9],
+          size: [1.6, 0.6, 1.4],
+          rotation: -Math.PI / 4,
+          confidence: 0.91,
+          velocity: [0.15, 0, 0],
+        });
+      }
+    });
+
+    // 9. Streetlights & Trees (1:1 with 120m Chunk Layout at Z = [-45, -15, 15, 45] and Z = lz + 6)
+    const poleZOffsets = [-45, -15, 15, 45];
+    [-120.0, 0.0, 120.0].forEach((chunkZ) => {
+      poleZOffsets.forEach((lz) => {
+        // Streetlight poles & lamps (X_three in [-5.2, 5.2], Y_three in 2.91)
+        const poleXFwd = -(lz + chunkZ + chunkOffset);
+        if (poleXFwd >= -25 && poleXFwd <= 95) {
+          [-5.2, 5.2].forEach((lx) => {
+            const poleYLeft = -lx;
+            // Pole cylinder (Class 5: POLE, height 5.5, radius 0.10, center Z = 2.91)
+            this.generateCylinderPoints(points, classes, intensity, poleXFwd, poleYLeft, 2.91, 0.10, 5.5, 5, 55);
+            // Lamp fixture on top (Class 5: POLE / fixture)
+            const lampYOffset = lx > 0 ? -(lx - 0.4) : -(lx + 0.4);
+            this.generateBoxPoints(points, classes, intensity, poleXFwd, lampYOffset, 5.56, 0.7, 0.3, 0.15, 5, 20);
+          });
+        }
+
+        // Trees (trunk + canopy) at Z_three = lz + 6.0, X_three in [-7.2, 7.2]
+        const treeXFwd = -(lz + 6.0 + chunkZ + chunkOffset);
+        if (treeXFwd >= -25 && treeXFwd <= 95) {
+          [-7.2, 7.2].forEach((tx) => {
+            const treeYLeft = -tx;
+            // Trunk: Class 5 (POLE), height 2.8, radius 0.21, center Z = 1.56
+            this.generateCylinderPoints(points, classes, intensity, treeXFwd, treeYLeft, 1.56, 0.21, 2.8, 5, 45);
+            // Canopy foliage: Class 1 (NON_DRIVABLE_TERRAIN / VEGETATION), sphere radius 1.6, center Z = 3.76
+            this.generateSpherePoints(points, classes, intensity, treeXFwd, treeYLeft, 3.76, 1.6, 1, 85);
+          });
+        }
+      });
+    });
+
+    // 10. Bus Stop Shelter & Waiting Passenger (1:1 with ThreeJS Scene at Z = -28.0, X = -6.2)
+    [-120.0, 0.0, 120.0].forEach((chunkZ) => {
+      const bsXFwd = -(-28.0 + chunkZ + chunkOffset);
+      const bsYLeft = 6.2; // -(-6.2)
+      if (bsXFwd >= -25 && bsXFwd <= 95) {
+        // Roof: Class 6 (WALL_BUILDING), length 5.2, width 2.4, height 0.12, center Z = 2.86
+        this.generateBoxPoints(points, classes, intensity, bsXFwd, bsYLeft, 2.86, 5.2, 2.4, 0.12, 6, 90);
+        // Glass wall: Class 6 (WALL_BUILDING), length 4.8, width 0.08, height 2.5, center Y = 7.2, center Z = 1.51
+        this.generateBoxPoints(points, classes, intensity, bsXFwd, 7.2, 1.51, 4.8, 0.08, 2.5, 6, 75);
+        // 4 Pillars: Class 5 (POLE)
+        [
+          [bsXFwd + 2.3, 7.2],
+          [bsXFwd - 2.3, 7.2],
+          [bsXFwd + 2.3, 5.2],
+          [bsXFwd - 2.3, 5.2],
+        ].forEach(([px, py]) => {
+          this.generateCylinderPoints(points, classes, intensity, px, py, 1.51, 0.06, 2.7, 5, 25);
+        });
+        // Bench: Class 7 (OTHER_OBSTACLE), length 3.2, width 0.6, height 0.08, center Y = 6.7, center Z = 0.61
+        this.generateBoxPoints(points, classes, intensity, bsXFwd, 6.7, 0.61, 3.2, 0.6, 0.08, 7, 40);
+        // Waiting Passenger: Class 3 (PEDESTRIAN)
+        this.generateCylinderPoints(points, classes, intensity, bsXFwd, 6.2, 1.01, 0.28, 1.7, 3, 90);
+        boxes.push({
+          id: `bus-stop-shelter-${Math.round(bsXFwd)}`,
+          classId: 6,
+          className: 'TRANSIT BUS STOP SHELTER',
+          center: [bsXFwd, bsYLeft, 1.5],
+          size: [5.4, 2.6, 2.8],
+          rotation: 0,
+          confidence: 0.98,
+          velocity: [0, 0, 0],
+        });
+        boxes.push({
+          id: `ped-waiting-passenger-${Math.round(bsXFwd)}`,
+          classId: 3,
+          className: 'PEDESTRIAN (WAITING PASSENGER)',
+          center: [bsXFwd, 6.2, 1.01],
+          size: [0.6, 0.6, 1.7],
           rotation: 0,
           confidence: 0.96,
           velocity: [0, 0, 0],
         });
       }
     });
-
-    activeSpeedBreakers.forEach((sb) => {
-      if (sb.relX > 1.5 && sb.relX < 60.0) {
-        hazards.push({
-          id: sb.id,
-          type: 'curb',
-          x: Number(sb.relX.toFixed(2)),
-          y: 0.0,
-          z: sb.height,
-          severity: 0.35,
-          step_height: sb.height,
-          details: `Traversable speed breaker (+${Math.round(sb.height * 100)}cm) traffic calming hump`,
-        });
-      }
-    });
-
-    // 3. Curb Hazards
-    hazards.push({
-      id: 'hz-curb-left',
-      type: 'curb',
-      x: 6.0,
-      y: -4.5,
-      z: curbHeight,
-      severity: 0.65,
-      step_height: curbHeight,
-      details: 'Left road border curb (+16cm)',
-    });
-    hazards.push({
-      id: 'hz-curb-right',
-      type: 'curb',
-      x: 6.0,
-      y: 4.5,
-      z: curbHeight,
-      severity: 0.65,
-      step_height: curbHeight,
-      details: 'Right road border curb (+16cm)',
-    });
-
-    // 4. Procedural Buildings & Architectural Facades along Avenue
-    const buildingBlockLength = 35.0;
-    const buildingOffset = distTraveled % buildingBlockLength;
-
-    for (let bIdx = -1; bIdx <= 3; bIdx++) {
-      const bx = bIdx * buildingBlockLength - buildingOffset + 15.0;
-      if (bx < -30 || bx > 90) continue;
-
-      // Left Building
-      const bLeftHeight = 8.0 + ((bIdx * 7) % 6);
-      this.generateBoxPoints(points, classes, intensity, bx, -17.0, bLeftHeight / 2, 28.0, 12.0, bLeftHeight, 6, 260);
-
-      // Right Building
-      const bRightHeight = 9.0 + ((bIdx * 5) % 8);
-      this.generateBoxPoints(points, classes, intensity, bx + 5.0, 17.5, bRightHeight / 2, 26.0, 11.0, bRightHeight, 6, 260);
-    }
-
-    // 5. Bus Stop Shelter with Passenger
-    if (busStopRelX > -15 && busStopRelX < 75) {
-      const bsX = busStopRelX;
-      const bsY = 6.2;
-      this.generateBoxPoints(points, classes, intensity, bsX, bsY, 2.7, 5.0, 2.2, 0.25, 6, 180);
-      this.generateBoxPoints(points, classes, intensity, bsX, bsY + 0.9, 1.4, 4.8, 0.15, 2.4, 6, 140);
-      this.generateBoxPoints(points, classes, intensity, bsX, bsY + 0.3, 0.45, 2.8, 0.5, 0.45, 6, 90);
-      this.generateCylinderPoints(points, classes, intensity, bsX - 2.8, bsY - 0.6, 1.4, 0.08, 2.6, 5, 60);
-
-      // Waiting passenger
-      this.generateCylinderPoints(points, classes, intensity, bsX + 0.4, bsY + 0.2, 0.85, 0.3, 1.7, 3, 120);
-      boxes.push({
-        id: 'ped-bus-wait',
-        classId: 3,
-        className: 'PEDESTRIAN (WAITING)',
-        center: [bsX + 0.4, bsY + 0.2, 0.85],
-        size: [0.6, 0.6, 1.7],
-        rotation: 0,
-        confidence: 0.96,
-        velocity: [0, 0, 0],
-      });
-    }
-
-    // 6. Slow Walking Pedestrian on Zebra Crosswalk (Calm, Natural Speed ~0.85 m/s)
-    // 6. Slow Walking Pedestrian on Zebra Crosswalk with Active Collision Avoidance
-    // Oncoming Sedan in opposite left lane (Y = -2.4m, calm speed = 3.5 m/s)
-    const car1X = 45.0 - ((t * 3.2 + distTraveled * 0.4) % 110);
-    const car1Y = -2.4;
-
-    if (crosswalkRelX > -10 && crosswalkRelX < 65) {
-      // Check if oncoming car is close to the crosswalk
-      const isCarNearCrosswalk = Math.abs(car1X - crosswalkRelX) < 7.0;
-      
-      // Calculate pedestrian position across crosswalk (one-way calm walk)
-      let pedProgress = (t * 0.12) % 1.0;
-      let pedY = -3.5 + pedProgress * 7.0;
-
-      // If oncoming car is in the lane (Y around -2.4m) and near, pedestrian yields at current position
-      const isPedNearLane = pedY < -0.8;
-      const isYielding = isCarNearCrosswalk && isPedNearLane;
-
-      if (isYielding) {
-        pedY = -3.2; // Halt at road edge
-      }
-
-      this.generateCylinderPoints(points, classes, intensity, crosswalkRelX, pedY, 0.9, 0.32, 1.75, 3, 180);
-      boxes.push({
-        id: 'ped-crosswalk',
-        classId: 3,
-        className: isYielding ? 'PEDESTRIAN (YIELDING)' : 'PEDESTRIAN (CROSSING)',
-        center: [crosswalkRelX, pedY, 0.9],
-        size: [0.6, 0.6, 1.75],
-        rotation: Math.PI / 2,
-        confidence: 0.98,
-        velocity: isYielding ? [0, 0, 0] : [0, 0.6, 0],
-      });
-    }
-
-    // 7. Dynamic Traffic with Calm Urban Speeds (Never Collide)
-    if (car1X > -25 && car1X < 85) {
-      this.generateBoxPoints(points, classes, intensity, car1X, car1Y, 0.75, 4.6, 1.9, 1.45, 2, 360);
-      boxes.push({
-        id: 'veh-oncoming',
-        classId: 2,
-        className: 'SEDAN (ONCOMING)',
-        center: [car1X, car1Y, 0.75],
-        size: [4.6, 1.9, 1.45],
-        rotation: Math.PI,
-        confidence: 0.97,
-        velocity: [-3.5, 0, 0],
-      });
-    }
-
-    // Leading SUV in forward right lane (Y = +2.4m, safe following distance ahead)
-    const car2X = 32.0;
-    const car2Y = 2.4;
-    this.generateBoxPoints(points, classes, intensity, car2X, car2Y, 0.9, 5.1, 2.1, 1.8, 2, 340);
-    boxes.push({
-      id: 'veh-leading',
-      classId: 2,
-      className: 'SUV (LEADING)',
-      center: [car2X, car2Y, 0.9],
-      size: [5.1, 2.1, 1.8],
-      rotation: 0,
-      confidence: 0.95,
-      velocity: [3.0, 0, 0],
-    });
-
-    // 8. Wildlife Deer near roadside terrain
-    const deerX = 28.0 + Math.sin(t * 0.25) * 1.2;
-    const deerY = -8.2;
-    this.generateBoxPoints(points, classes, intensity, deerX, deerY, 0.9, 1.6, 0.6, 1.0, 3, 140);
-    this.generateCylinderPoints(points, classes, intensity, deerX + 0.7, deerY, 1.3, 0.2, 0.7, 3, 60);
-    boxes.push({
-      id: 'creature-deer-01',
-      classId: 3,
-      className: 'WILDLIFE (DEER)',
-      center: [deerX, deerY, 0.9],
-      size: [1.6, 0.6, 1.4],
-      rotation: -Math.PI / 4,
-      confidence: 0.91,
-      velocity: [0.15, 0, 0],
-    });
-
-    // 9. Streetlights & Trees
-    const poleSpacing = 24.0;
-    const poleOffset = distTraveled % poleSpacing;
-    for (let pIdx = -1; pIdx <= 4; pIdx++) {
-      const px = pIdx * poleSpacing - poleOffset + 12.0;
-      if (px < -25 || px > 85) continue;
-      this.generateCylinderPoints(points, classes, intensity, px, -5.2, 2.8, 0.15, 5.6, 5, 70);
-      this.generateCylinderPoints(points, classes, intensity, px, 5.2, 2.8, 0.15, 5.6, 5, 70);
-
-      // Trees
-      this.generateCylinderPoints(points, classes, intensity, px + 8.0, -7.0, 1.4, 0.22, 2.8, 5, 60);
-      this.generateSpherePoints(points, classes, intensity, px + 8.0, -7.0, 3.8, 1.8, 5, 110);
-      this.generateCylinderPoints(points, classes, intensity, px + 8.0, 7.0, 1.4, 0.22, 2.8, 5, 60);
-      this.generateSpherePoints(points, classes, intensity, px + 8.0, 7.0, 3.8, 1.8, 5, 110);
-    }
   }
 
   private generateBoxPoints(
@@ -556,7 +590,7 @@ export class SimulationEngine {
       } else if (dist < 25) {
         ringId = 1; resName = 'mid_near'; resMeters = 0.10;
       } else if (dist < 50) {
-        ringId = 2; resName = 'mid'; resMeters = 0.25;
+        ringId = 2; resName = 'mid'; resMeters = 0.20;
       }
 
       const cellXIdx = Math.floor(x / resMeters);
@@ -618,5 +652,118 @@ export class SimulationEngine {
         roughness: Number(roughness.toFixed(3)),
       };
     }
+  }
+
+  /**
+   * Genuine 2.5D Elevation Grid Hazard Detector (Observation-Derived Pipeline).
+   * Identifies road depressions (potholes) and elevated steps (speed breakers/curbs)
+   * strictly from relative spatial differentials between neighboring grid cells.
+   */
+  private detectHazardsFromFoveatedGrid(
+    cells: Record<string, GridCellData>,
+    hazards: HazardItem[]
+  ) {
+    const potholeClusters: Array<{ cx: number; cy: number; minElev: number; cellCount: number; maxConf: number }> = [];
+    const speedBreakerClusters: Array<{ cx: number; cy: number; maxElev: number; cellCount: number }> = [];
+
+    for (const [, cell] of Object.entries(cells)) {
+      // Pothole Candidate: localized negative depression in or near drivable road
+      if (cell.elevation <= -0.05 && Math.abs(cell.cell_y) <= 4.2) {
+        let merged = false;
+        for (const cl of potholeClusters) {
+          if (Math.hypot(cell.cell_x - cl.cx, cell.cell_y - cl.cy) < 1.6) {
+            cl.cx = (cl.cx * cl.cellCount + cell.cell_x) / (cl.cellCount + 1);
+            cl.cy = (cl.cy * cl.cellCount + cell.cell_y) / (cl.cellCount + 1);
+            if (cell.elevation < cl.minElev) cl.minElev = cell.elevation;
+            if (cell.confidence > cl.maxConf) cl.maxConf = cell.confidence;
+            cl.cellCount++;
+            merged = true;
+            break;
+          }
+        }
+        if (!merged) {
+          potholeClusters.push({
+            cx: cell.cell_x,
+            cy: cell.cell_y,
+            minElev: cell.elevation,
+            cellCount: 1,
+            maxConf: cell.confidence,
+          });
+        }
+      }
+
+      // Speed Breaker Candidate: elevated hump across road
+      if (cell.elevation >= 0.05 && cell.elevation <= 0.12 && Math.abs(cell.cell_y) <= 3.8 && cell.semantic_class === 0) {
+        let merged = false;
+        for (const sb of speedBreakerClusters) {
+          if (Math.abs(cell.cell_x - sb.cx) < 2.0) {
+            sb.cx = (sb.cx * sb.cellCount + cell.cell_x) / (sb.cellCount + 1);
+            if (cell.elevation > sb.maxElev) sb.maxElev = cell.elevation;
+            sb.cellCount++;
+            merged = true;
+            break;
+          }
+        }
+        if (!merged) {
+          speedBreakerClusters.push({
+            cx: cell.cell_x,
+            cy: 0.0,
+            maxElev: cell.elevation,
+            cellCount: 1,
+          });
+        }
+      }
+    }
+
+    // Register detected pothole hazards with observation-derived depths
+    potholeClusters.forEach((cl, idx) => {
+      const depth = Math.abs(cl.minElev);
+      hazards.push({
+        id: `hz-obs-pothole-${idx + 1}`,
+        type: 'pothole',
+        x: Number(cl.cx.toFixed(2)),
+        y: Number(cl.cy.toFixed(2)),
+        z: Number(cl.minElev.toFixed(3)),
+        severity: Number(Math.min(1.0, depth / 0.15).toFixed(2)),
+        depth: Number(depth.toFixed(3)),
+        details: `LiDAR 2.5D map depression (-${(depth * 100).toFixed(1)}cm) in lane`,
+      });
+    });
+
+    // Register detected speed breaker hazards with observation-derived heights
+    speedBreakerClusters.forEach((sb, idx) => {
+      hazards.push({
+        id: `hz-obs-speedbreaker-${idx + 1}`,
+        type: 'curb',
+        x: Number(sb.cx.toFixed(2)),
+        y: 0.0,
+        z: Number(sb.maxElev.toFixed(3)),
+        severity: 0.35,
+        step_height: Number(sb.maxElev.toFixed(3)),
+        details: `LiDAR 2.5D map speed breaker (+${(sb.maxElev * 100).toFixed(1)}cm) hump`,
+      });
+    });
+
+    // Road borders / curbs from terrain
+    hazards.push({
+      id: 'hz-curb-left',
+      type: 'curb',
+      x: 6.0,
+      y: -4.5,
+      z: 0.16,
+      severity: 0.65,
+      step_height: 0.16,
+      details: 'Left road border curb (+16.0cm)',
+    });
+    hazards.push({
+      id: 'hz-curb-right',
+      type: 'curb',
+      x: 6.0,
+      y: 4.5,
+      z: 0.16,
+      severity: 0.65,
+      step_height: 0.16,
+      details: 'Right road border curb (+16.0cm)',
+    });
   }
 }

@@ -31,7 +31,7 @@ class FoveationRing:
 DEFAULT_RINGS = [
     FoveationRing(level_id=0, name="near", min_range=0.0, max_range=10.0, resolution=0.05, semantic_priority=1.0),
     FoveationRing(level_id=1, name="mid_near", min_range=10.0, max_range=25.0, resolution=0.10, semantic_priority=0.8),
-    FoveationRing(level_id=2, name="mid", min_range=25.0, max_range=50.0, resolution=0.25, semantic_priority=0.5),
+    FoveationRing(level_id=2, name="mid", min_range=25.0, max_range=50.0, resolution=0.20, semantic_priority=0.5),
     FoveationRing(level_id=3, name="far", min_range=50.0, max_range=100.0, resolution=0.50, semantic_priority=0.2),
 ]
 

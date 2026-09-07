@@ -28,9 +28,10 @@ export default {
         }
       },
       fontFamily: {
-        sans: ['"Plus Jakarta Sans"', 'Inter', 'system-ui', 'sans-serif'],
-        mono: ['"JetBrains Mono"', 'Consolas', 'monospace'],
-        display: ['Outfit', '"Plus Jakarta Sans"', 'sans-serif'],
+        sans: ['Inter', '"Plus Jakarta Sans"', 'system-ui', '-apple-system', 'sans-serif'],
+        mono: ['"JetBrains Mono"', 'Consolas', 'Menlo', 'monospace'],
+        display: ['"Space Grotesk"', 'Outfit', 'Inter', 'sans-serif'],
+        tech: ['"Space Grotesk"', '"JetBrains Mono"', 'monospace'],
       },
       boxShadow: {
         'cyan-glow': '0 0 25px rgba(56, 189, 248, 0.3)',

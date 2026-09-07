@@ -130,8 +130,8 @@ export const FOVEATION_RINGS: FoveationRing[] = [
     label: 'Ring 2: Mid Range',
     minRange: 25.0,
     maxRange: 50.0,
-    resolution: 0.25,
-    description: 'Intermediate perception zone (25 cm)',
+    resolution: 0.20,
+    description: 'Intermediate perception zone (20 cm)',
     color: '#8b5cf6',
   },
   {

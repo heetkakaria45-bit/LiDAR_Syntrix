@@ -45,8 +45,8 @@ def test_resolution_for_distance_nominal(indexer: FoveatedGridIndexer) -> None:
     # Level 1 (10-25m) -> 0.10m (10 cm)
     assert indexer.resolution_for_distance(15.0) == pytest.approx(0.10)
 
-    # Level 2 (25-50m) -> 0.25m (25 cm)
-    assert indexer.resolution_for_distance(35.0) == pytest.approx(0.25)
+    # Level 2 (25-50m) -> 0.20m (20 cm)
+    assert indexer.resolution_for_distance(35.0) == pytest.approx(0.20)
 
     # Level 3 (50-100m) -> 0.50m (50 cm)
     assert indexer.resolution_for_distance(75.0) == pytest.approx(0.50)
@@ -60,8 +60,8 @@ def test_resolution_for_distance_exact_boundaries(indexer: FoveatedGridIndexer) 
     # Exactly 10.0m belongs to Level 1 (0.10m)
     assert indexer.resolution_for_distance(10.0) == pytest.approx(0.10)
 
-    # Exactly 25.0m belongs to Level 2 (0.25m)
-    assert indexer.resolution_for_distance(25.0) == pytest.approx(0.25)
+    # Exactly 25.0m belongs to Level 2 (0.20m)
+    assert indexer.resolution_for_distance(25.0) == pytest.approx(0.20)
 
     # Exactly 50.0m belongs to Level 3 (0.50m)
     assert indexer.resolution_for_distance(50.0) == pytest.approx(0.50)
@@ -80,10 +80,10 @@ def test_resolution_for_distance_epsilon_boundaries(indexer: FoveatedGridIndexer
 
     # Mid-near / Mid boundary around 25m
     assert indexer.resolution_for_distance(25.0 - eps) == pytest.approx(0.10)
-    assert indexer.resolution_for_distance(25.0 + eps) == pytest.approx(0.25)
+    assert indexer.resolution_for_distance(25.0 + eps) == pytest.approx(0.20)
 
     # Mid / Far boundary around 50m
-    assert indexer.resolution_for_distance(50.0 - eps) == pytest.approx(0.25)
+    assert indexer.resolution_for_distance(50.0 - eps) == pytest.approx(0.20)
     assert indexer.resolution_for_distance(50.0 + eps) == pytest.approx(0.50)
 
     # Far boundary around 100m

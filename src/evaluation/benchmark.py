@@ -20,7 +20,7 @@ class BenchmarkRunner:
 
         Contrasts:
             - Uniform 5 cm grid covering [-100, 100]m x [-100, 100]m
-            - Foveated Multi-Ring grid (5cm, 10cm, 25cm, 50cm)
+            - Foveated Multi-Ring grid (5cm, 10cm, 20cm, 50cm)
 
         All metrics are strictly tagged with provenance ('CALCULATED' or 'THEORETICAL').
         """
@@ -33,7 +33,7 @@ class BenchmarkRunner:
         ring_specs = [
             {"name": "near", "r_min": 0.0, "r_max": 10.0, "res": 0.05},
             {"name": "mid_near", "r_min": 10.0, "r_max": 25.0, "res": 0.10},
-            {"name": "mid", "r_min": 25.0, "r_max": 50.0, "res": 0.25},
+            {"name": "mid", "r_min": 25.0, "r_max": 50.0, "res": 0.20},
             {"name": "far", "r_min": 50.0, "r_max": 100.0, "res": 0.50},
         ]
 
@@ -228,7 +228,7 @@ class BenchmarkRunner:
         mem_uniform_active_mb = (uniform_cells_count * bytes_per_cell) / (1024 * 1024)
 
         # -------------------------------------------------------------
-        # 3. SYNTRIX Foveated Variable-Resolution Grid (5cm, 10cm, 25cm, 50cm)
+        # 3. SYNTRIX Foveated Variable-Resolution Grid (5cm, 10cm, 20cm, 50cm)
         # -------------------------------------------------------------
         indexer = FoveatedGridIndexer()
         mapper = SemanticElevationMapper(config=MappingConfig(), grid_indexer=indexer)

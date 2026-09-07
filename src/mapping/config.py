@@ -46,7 +46,7 @@ class MappingConfig:
         default_factory=lambda: {
             "near": 0.05,
             "mid_near": 0.10,
-            "mid": 0.25,
+            "mid": 0.20,
             "far": 0.50,
         }
     )
@@ -82,7 +82,7 @@ class MappingConfig:
             resolutions = {
                 "near": 0.05,
                 "mid_near": 0.10,
-                "mid": 0.25,
+                "mid": 0.20,
                 "far": 0.50,
             }
 

@@ -245,7 +245,7 @@ class ControlCenterHandler(BaseHTTPRequestHandler):
                     "module": "src/foveated_grid/",
                     "input": "SemanticPointCloud",
                     "output": "Spatial Multi-Ring Assignments",
-                    "resolution": "4 Rings: 5cm (0-10m), 10cm (10-25m), 25cm (25-50m), 50cm (50-100m)",
+                    "resolution": "4 Rings: 5cm (0-10m), 10cm (10-25m), 20cm (25-50m), 50cm (50-100m)",
                     "status": "ONLINE",
                 },
                 {

@@ -9,9 +9,21 @@
   body {
     background-color: #0a0e14;
     color: #f1f5f9;
-    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
-    letter-spacing: -0.01em;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11", "tnum";
+    letter-spacing: -0.012em;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
   }
+}
+
+.font-tabular {
+  font-feature-settings: "tnum" 1, "cv02" 1;
+}
+
+.panel-title {
+  font-family: 'Space Grotesk', Outfit, 'Plus Jakarta Sans', sans-serif;
+  letter-spacing: 0.04em;
 }
 
 /* Custom Tactical Scrollbars */

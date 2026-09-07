@@ -108,7 +108,7 @@ class ApiService {
         module: 'src/foveated_grid/',
         input: 'SemanticPointCloud',
         output: 'Spatial Multi-Ring Assignments',
-        resolution: '4 Rings: 5cm (0-10m), 10cm (10-25m), 25cm (25-50m), 50cm (50-100m)',
+        resolution: '4 Rings: 5cm (0-10m), 10cm (10-25m), 20cm (25-50m), 50cm (50-100m)',
         status: 'ONLINE',
       },
       {
@@ -123,49 +123,44 @@ class ApiService {
       },
       {
         stage_id: 5,
-        name: 'Real-Time Integration & Orchestration',
+        name: 'Integration, Optimization & Web Telemetry',
         owner: 'Atharva',
         module: 'src/integration/',
-        input: 'End-to-End Pipeline Wiring',
-        output: 'Live Telemetry Snapshot & Temporal Playback',
-        resolution: 'Hardware Micro-Timers & RSS Profiling',
+        input: 'SemanticMap, Preprocessed Frame, Pipeline State',
+        output: 'Synchronized Frame Stream & WebSocket Telemetry',
+        resolution: 'Full-Pipeline Execution (~60 FPS target)',
         status: 'ONLINE',
       },
       {
         stage_id: 6,
-        name: '3D WebGL LiDAR Dashboard & HUD',
-        owner: 'Atharva',
-        module: 'src/visualization/',
-        input: 'SemanticMap & Live Telemetry',
-        output: 'Interactive Spatial WebGL Console',
-        resolution: 'Physical 3D World vs 2.5D Computational Overlay',
-        status: 'ONLINE',
-      },
-      {
-        stage_id: 7,
-        name: 'Evaluation & Benchmarking',
+        name: 'Evaluation & Accuracy Benchmarking',
         owner: 'Himisha',
         module: 'src/evaluation/',
-        input: 'Uniform vs Foveated Comparative Runs',
-        output: 'mIoU, Elevation RMSE, Cell Count & Memory Savings',
-        resolution: '>95% Memory Reduction Verified',
+        input: 'Predicted SemanticMap, Ground Truth Point Cloud',
+        output: 'mIoU, Elevation RMSE, Compression & Latency Profile',
+        resolution: 'Stratified Distance Bins (Near, Mid, Far)',
         status: 'ONLINE',
       },
     ];
   }
 
   public async fetchBenchmark(): Promise<any> {
+    return this.fetchBenchmarkComparison();
+  }
+
+  public async fetchBenchmarkComparison(): Promise<any> {
     try {
       const res = await fetch('/api/benchmark', { signal: AbortSignal.timeout(2000) });
       if (res.ok) {
         return await res.json();
       }
     } catch {
-      // return default benchmark dataset
+      // return default simulated comparison
     }
 
     return {
-      uniform_vs_foveated: {
+      title: 'Uniform Grid vs. Foveated Spatial Grid Benchmark',
+      metrics: {
         uniform_cell_count: 400000,
         foveated_cell_count: 18420,
         cell_reduction_ratio: 21.7,
@@ -179,7 +174,7 @@ class ApiService {
       distance_bins: [
         { bin: '0-10m (Ring 0)', resolution: '5 cm', miou: 94.8, elevation_rmse_cm: 1.2, cell_density_pct: 54.2 },
         { bin: '10-25m (Ring 1)', resolution: '10 cm', miou: 91.2, elevation_rmse_cm: 2.8, cell_density_pct: 26.5 },
-        { bin: '25-50m (Ring 2)', resolution: '25 cm', miou: 84.5, elevation_rmse_cm: 5.4, cell_density_pct: 12.8 },
+        { bin: '25-50m (Ring 2)', resolution: '20 cm', miou: 84.5, elevation_rmse_cm: 5.4, cell_density_pct: 12.8 },
         { bin: '50-100m (Ring 3)', resolution: '50 cm', miou: 76.1, elevation_rmse_cm: 11.2, cell_density_pct: 6.5 },
       ],
     };

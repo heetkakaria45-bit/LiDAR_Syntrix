@@ -43,7 +43,7 @@ foveation_levels:
     level_id: 2
     min_range: 25.0
     max_range: 50.0
-    resolution: 0.25        # 25 cm grid resolution
+    resolution: 0.20        # 20 cm grid resolution
     description: "Medium resolution intermediate perception zone"
     semantic_priority: 0.5
 

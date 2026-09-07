@@ -52,7 +52,7 @@ const CLASS_NAMES = {
 const RESOLUTION_BY_RING = {
   near: 0.05,     // R0: 5 cm (0-10m)
   mid_near: 0.10, // R1: 10 cm (10-25m)
-  mid: 0.25,      // R2: 25 cm (25-50m)
+  mid: 0.20,      // R2: 20 cm (25-50m)
   far: 0.50,      // R3: 50 cm (50-100m)
 };
 
@@ -527,7 +527,7 @@ class ThreePerceptionEngine {
     const ringConfigs = [
       { r: 10, color: 0x00f0ff, label: 'R0 (5cm)' },
       { r: 25, color: 0x10b981, label: 'R1 (10cm)' },
-      { r: 50, color: 0xf59e0b, label: 'R2 (25cm)' },
+      { r: 50, color: 0xf59e0b, label: 'R2 (20cm)' },
       { r: 100, color: 0xa855f7, label: 'R3 (50cm)' },
     ];
 
@@ -635,7 +635,7 @@ class ThreePerceptionEngine {
       if (cell.semantic_class === 1) return 0xf59e0b; // Terrain/Curb (Amber)
       return 0xef4444; // Lethal Obstacle (Red)
     } else if (this.viewMode === 'benchmark') {
-      // Highlight foveated allocation: 5cm cyan, 10cm emerald, 25cm amber, 50cm purple
+      // Highlight foveated allocation: 5cm cyan, 10cm emerald, 20cm amber, 50cm purple
       if (cell.resolution_level === 'near') return 0x00f0ff;
       if (cell.resolution_level === 'mid_near') return 0x10b981;
       if (cell.resolution_level === 'mid') return 0xf59e0b;
@@ -779,7 +779,7 @@ class ThreePerceptionEngine {
     let baseRes = '0.50 m (50 cm)';
     if (dist < 10.0) { ringName = 'Near (0–10m)'; baseRes = '0.05 m (5 cm)'; }
     else if (dist < 25.0) { ringName = 'Mid-Near (10–25m)'; baseRes = '0.10 m (10 cm)'; }
-    else if (dist < 50.0) { ringName = 'Mid (25–50m)'; baseRes = '0.25 m (25 cm)'; }
+    else if (dist < 50.0) { ringName = 'Mid (25–50m)'; baseRes = '0.20 m (20 cm)'; }
 
     if (expDist) expDist.textContent = ringName;
     if (expBaseRes) expBaseRes.textContent = baseRes;

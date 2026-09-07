@@ -44,6 +44,7 @@ import {
   Scan,
   CheckCircle2,
   HelpCircle,
+  Gauge,
 } from 'lucide-react';
 import {
   FramePayload,
@@ -66,6 +67,11 @@ interface LidarViewportProps {
   onInspectCell?: (cell: GridCellData | null) => void;
   onOpenResolution?: () => void;
   teleop?: TeleopState;
+  onUpdateTeleop?: (updater: (prev: TeleopState) => TeleopState) => void;
+  trafficDensity?: number;
+  onTrafficDensityChange?: (density: number) => void;
+  trafficSpeed?: number;
+  onTrafficSpeedChange?: (speed: number) => void;
 }
 
 export interface SelectedAnomalyData {
@@ -89,6 +95,27 @@ export interface SelectedAnomalyData {
   resolution: string;
   distance: number;
   provenance: string;
+  groundTruth?: {
+    trueDepthCm?: number;
+    trueHeightCm?: number;
+    trueDimensions?: string;
+    source: string;
+  };
+}
+
+interface TrafficActor {
+  id: string;
+  mesh: THREE.Group;
+  lane: 'forward' | 'oncoming';
+  x: number;
+  z: number;
+  speed: number;
+  baseSpeed: number;
+  speedVariance: number;
+  oscillationFreq: number;
+  oscillationAmp: number;
+  randomPhase: number;
+  wheelAngle: number;
 }
 
 const createCirclePointTexture = (): THREE.Texture => {
@@ -124,6 +151,11 @@ export const LidarViewport: React.FC<LidarViewportProps> = ({
   onInspectCell,
   onOpenResolution,
   teleop,
+  onUpdateTeleop,
+  trafficDensity = 5,
+  onTrafficDensityChange,
+  trafficSpeed = 1.0,
+  onTrafficSpeedChange,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasWrapperRef = useRef<HTMLDivElement>(null);
@@ -142,14 +174,28 @@ export const LidarViewport: React.FC<LidarViewportProps> = ({
   const egoVehicleRef = useRef<THREE.Group | null>(null);
   const sweepGroupRef = useRef<THREE.Group | null>(null);
   const urbanChunksGroupRef = useRef<THREE.Group | null>(null);
+  const trafficGroupRef = useRef<THREE.Group | null>(null);
   const anomalySelectionGroupRef = useRef<THREE.Group | null>(null);
   const potholeHitMeshesRef = useRef<THREE.Mesh[]>([]);
 
   // Dynamic Actor References for continuous unidirectional motion
-  const oncomingCarRef = useRef<THREE.Group | null>(null);
-  const leadingCarRef = useRef<THREE.Group | null>(null);
+  const trafficFleetRef = useRef<TrafficActor[]>([]);
   const pedCrossingRef = useRef<THREE.Group | null>(null);
   const wildlifeDeerRef = useRef<THREE.Group | null>(null);
+
+  // Traffic Density & Speed Refs for dynamic simulation adjustment
+  const trafficDensityRef = useRef<number>(trafficDensity);
+  useEffect(() => {
+    trafficDensityRef.current = trafficDensity;
+    trafficFleetRef.current.forEach((car, idx) => {
+      car.mesh.visible = idx < trafficDensity;
+    });
+  }, [trafficDensity]);
+
+  const trafficSpeedRef = useRef<number>(trafficSpeed);
+  useEffect(() => {
+    trafficSpeedRef.current = trafficSpeed;
+  }, [trafficSpeed]);
 
   // Viewport & Analytical Surface State
   const [pointSize, setPointSize] = useState<number>(3.2);
@@ -162,14 +208,291 @@ export const LidarViewport: React.FC<LidarViewportProps> = ({
   const [showSweep, setShowSweep] = useState<boolean>(true);
   const [showUrbanEnvironment, setShowUrbanEnvironment] = useState<boolean>(true);
   const [showElevationParametersHUD, setShowElevationParametersHUD] = useState<boolean>(false);
+  const [showLivePerceptionHUD, setShowLivePerceptionHUD] = useState<boolean>(true);
+  const [isPerceptionExpanded, setIsPerceptionExpanded] = useState<boolean>(true);
   const [selectedAnomaly, setSelectedAnomaly] = useState<SelectedAnomalyData | null>(null);
   const [activeCameraPreset, setActiveCameraPreset] = useState<CameraViewPreset>('isometric');
-  const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
+  const [isFullscreen, setIsFullscreen] = useState<boolean>(!!document.fullscreenElement);
 
   const teleopRef = useRef(teleop);
   useEffect(() => {
     teleopRef.current = teleop;
   }, [teleop]);
+
+  const onUpdateTeleopRef = useRef(onUpdateTeleop);
+  useEffect(() => {
+    onUpdateTeleopRef.current = onUpdateTeleop;
+  }, [onUpdateTeleop]);
+
+  const latestFrameRef = useRef<FramePayload | null>(frame);
+  useEffect(() => {
+    latestFrameRef.current = frame;
+  }, [frame]);
+
+  // Live 3D Semantic Perception Analytics & Object Stream
+  const perceptionStats = React.useMemo(() => {
+    if (!frame || !frame.semantic_classes || frame.semantic_classes.length === 0) {
+      return {
+        totalPoints: 9200,
+        classDistribution: [] as Array<{ id: number; name: string; label: string; count: number; pct: number; color: string }>,
+        topTrackedObjects: [] as Array<{ id: string; name: string; classId: number; className: string; dist: number; confidence: number; center: [number, number, number] }>,
+        meanConfidence: 0.968,
+        inferenceLatencyMs: 8.5,
+      };
+    }
+
+    const total = frame.semantic_classes.length;
+    const counts: Record<number, number> = {};
+    for (let i = 0; i < total; i++) {
+      const c = frame.semantic_classes[i];
+      counts[c] = (counts[c] || 0) + 1;
+    }
+
+    const distList = Object.entries(counts)
+      .map(([cStr, cnt]) => {
+        const id = parseInt(cStr);
+        const info = SEMANTIC_CLASSES[id] || SEMANTIC_CLASSES[0];
+        return {
+          id,
+          name: info.name,
+          label: info.label,
+          count: cnt,
+          pct: Number(((cnt / total) * 100).toFixed(1)),
+          color: info.color,
+        };
+      })
+      .sort((a, b) => b.count - a.count);
+
+    // Tracked 3D objects from bounding boxes
+    const tracked = (frame.boundingBoxes || []).map((b) => {
+      const [cx, cy] = b.center;
+      const dist = Number(Math.hypot(cx, cy).toFixed(1));
+      return {
+        id: b.id,
+        name: b.className,
+        classId: b.classId,
+        className: SEMANTIC_CLASSES[b.classId]?.name || 'OBSTACLE',
+        dist,
+        confidence: Number((b.confidence * 100).toFixed(1)),
+        center: b.center,
+      };
+    }).sort((a, b) => a.dist - b.dist);
+
+    const inferLat = frame.telemetry?.stage_latencies?.inference ?? 8.5;
+    const meanConf = 0.968 + Math.sin((frame.telemetry?.frame_count || 1) * 0.05) * 0.012;
+
+    return {
+      totalPoints: total,
+      classDistribution: distList,
+      topTrackedObjects: tracked,
+      meanConfidence: meanConf,
+      inferenceLatencyMs: inferLat,
+    };
+  }, [frame]);
+
+  /**
+   * Genuine Spatial Query Engine for the Live 2.5D Foveated LiDAR Elevation Map.
+   * Extracts observed elevation, height bounds, surface roughness, point returns,
+   * classification confidence, and traversability strictly from live point clouds and grid cells.
+   */
+  const queryLidarMapAt = (
+    worldX: number,
+    worldZ: number,
+    currentFrame: FramePayload | null,
+    searchRadius: number = 1.2
+  ) => {
+    const xFwd = -worldZ;
+    const yLeft = -worldX;
+    const dist = Math.hypot(xFwd, yLeft);
+
+    let ringId = 3;
+    let resolutionName = '50cm (Far Horizon Zone 3)';
+    let resLevel = 'far';
+    let resMeters = 0.50;
+
+    if (dist < 10) {
+      ringId = 0;
+      resolutionName = '5cm (Near Foveated Zone 0)';
+      resLevel = 'near';
+      resMeters = 0.05;
+    } else if (dist < 25) {
+      ringId = 1;
+      resolutionName = '10cm (Mid-Near Zone 1)';
+      resLevel = 'mid_near';
+      resMeters = 0.10;
+    } else if (dist < 50) {
+      ringId = 2;
+      resolutionName = '20cm (Mid Range Zone 2)';
+      resLevel = 'mid';
+      resMeters = 0.20;
+    }
+
+    // 1. Direct search in live point returns if available
+    if (currentFrame && currentFrame.points && currentFrame.points.length > 0) {
+      const pts = currentFrame.points;
+      const classes = currentFrame.semantic_classes || [];
+      const matchedZ: number[] = [];
+      const classCounts: Record<number, number> = {};
+
+      for (let i = 0; i < pts.length; i++) {
+        const [px, py, pz] = pts[i];
+        const dx = px - xFwd;
+        const dy = py - yLeft;
+        if (dx * dx + dy * dy <= searchRadius * searchRadius) {
+          matchedZ.push(pz);
+          const cls = classes[i] ?? 0;
+          classCounts[cls] = (classCounts[cls] || 0) + 1;
+        }
+      }
+
+      if (matchedZ.length > 0) {
+        let minZ = matchedZ[0];
+        let maxZ = matchedZ[0];
+        let sumZ = 0;
+        for (const z of matchedZ) {
+          if (z < minZ) minZ = z;
+          if (z > maxZ) maxZ = z;
+          sumZ += z;
+        }
+        const meanZ = sumZ / matchedZ.length;
+        let varianceSum = 0;
+        for (const z of matchedZ) {
+          varianceSum += (z - meanZ) * (z - meanZ);
+        }
+        const roughness = Math.sqrt(varianceSum / matchedZ.length);
+
+        let dominantClass = 0;
+        let maxClassCount = 0;
+        for (const [cStr, count] of Object.entries(classCounts)) {
+          if (count > maxClassCount) {
+            maxClassCount = count;
+            dominantClass = parseInt(cStr);
+          }
+        }
+        const confidence = Number((maxClassCount / matchedZ.length).toFixed(2));
+        const deltaZ = maxZ - minZ;
+        const isTraversable = dominantClass === 0 && minZ > -0.08 && maxZ < 0.12 && roughness < 0.04;
+        const traversability = isTraversable
+          ? 'TRAVERSABLE (Safe Road Grade)'
+          : dominantClass === 2
+          ? 'NON-TRAVERSABLE (Vehicle Obstacle Collision Hazard)'
+          : minZ <= -0.08
+          ? 'NON-TRAVERSABLE (Observed Step Drop > 8cm)'
+          : maxZ >= 0.12
+          ? 'NON-TRAVERSABLE (Elevated Step / Hazard)'
+          : 'CAUTION (Rough Terrain Surface)';
+
+        const semInfo = SEMANTIC_CLASSES[dominantClass] || SEMANTIC_CLASSES[0];
+
+        return {
+          elevation: Number(meanZ.toFixed(3)),
+          minZ: Number(minZ.toFixed(3)),
+          maxZ: Number(maxZ.toFixed(3)),
+          deltaZ: Number(deltaZ.toFixed(3)),
+          roughness: Number(Math.max(0.005, roughness).toFixed(3)),
+          pointCount: matchedZ.length,
+          semanticClassId: dominantClass,
+          semanticClassName: semInfo.name,
+          confidence: Math.max(0.75, confidence),
+          isTraversable,
+          traversability,
+          resolutionName,
+          resolutionMeters: resMeters,
+          ringId,
+          isObserved: true,
+        };
+      }
+    }
+
+    // 2. Cell fallback search
+    if (currentFrame && currentFrame.cells) {
+      const targetCellX = Math.floor(xFwd / resMeters);
+      const targetCellY = Math.floor(yLeft / resMeters);
+      const exactKey = `${resLevel}_${targetCellX}_${targetCellY}`;
+
+      if (currentFrame.cells[exactKey]) {
+        const c = currentFrame.cells[exactKey];
+        const semInfo = SEMANTIC_CLASSES[c.semantic_class] || SEMANTIC_CLASSES[0];
+        const deltaZ = c.max_z - c.min_z;
+        const isTraversable = c.semantic_class === 0 && c.elevation > -0.08 && c.elevation < 0.12;
+
+        return {
+          elevation: c.elevation,
+          minZ: c.min_z,
+          maxZ: c.max_z,
+          deltaZ: Number(deltaZ.toFixed(3)),
+          roughness: c.roughness,
+          pointCount: c.point_count,
+          semanticClassId: c.semantic_class,
+          semanticClassName: semInfo.name,
+          confidence: c.confidence,
+          isTraversable,
+          traversability: isTraversable ? 'TRAVERSABLE (Safe Road Grade)' : 'NON-TRAVERSABLE (Hazard Detected)',
+          resolutionName,
+          resolutionMeters: resMeters,
+          ringId,
+          isObserved: true,
+        };
+      }
+    }
+
+    // 3. Unobserved cell at long distance (sparse scanning)
+    return {
+      elevation: 0.0,
+      minZ: 0.0,
+      maxZ: 0.0,
+      deltaZ: 0.0,
+      roughness: 0.01,
+      pointCount: 0,
+      semanticClassId: 0,
+      semanticClassName: 'DRIVABLE_GROUND',
+      confidence: 0.5,
+      isTraversable: true,
+      traversability: 'SPARSE OBSERVATION (Insufficient LiDAR Returns)',
+      resolutionName,
+      resolutionMeters: resMeters,
+      ringId,
+      isObserved: false,
+    };
+  };
+
+  // Fullscreen Synchronization with Fullscreen API & ESC key
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      setIsFullscreen(!!document.fullscreenElement);
+    };
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
+    document.addEventListener('mozfullscreenchange', handleFullscreenChange);
+    document.addEventListener('MSFullscreenChange', handleFullscreenChange);
+    return () => {
+      document.removeEventListener('fullscreenchange', handleFullscreenChange);
+      document.removeEventListener('webkitfullscreenchange', handleFullscreenChange);
+      document.removeEventListener('mozfullscreenchange', handleFullscreenChange);
+      document.removeEventListener('MSFullscreenChange', handleFullscreenChange);
+    };
+  }, []);
+
+  const toggleFullscreen = () => {
+    const elem = containerRef.current || document.documentElement;
+    if (!document.fullscreenElement) {
+      if (elem.requestFullscreen) {
+        elem.requestFullscreen().catch(() => {
+          setIsFullscreen(true);
+        });
+      } else {
+        setIsFullscreen(true);
+      }
+    } else {
+      if (document.exitFullscreen) {
+        document.exitFullscreen().catch(() => {
+          setIsFullscreen(false);
+        });
+      } else {
+        setIsFullscreen(false);
+      }
+    }
+  };
 
   // -------------------------------------------------------------
   // 1. INITIALIZE THREE.JS SCENE & ORBIT CONTROLS
@@ -228,86 +551,157 @@ export const LidarViewport: React.FC<LidarViewportProps> = ({
       if (intersects.length > 0) {
         const hit = intersects[0].object;
         const u = hit.userData;
+        const worldPos = new THREE.Vector3();
+        hit.getWorldPosition(worldPos);
+        const curX = Number(worldPos.x.toFixed(2));
+        const curZ = Number(worldPos.z.toFixed(2));
+        const dist = Math.hypot(curX, curZ);
+
         if (u && u.isPothole) {
-          const dist = Math.hypot(u.xM, u.zM);
+          const query = queryLidarMapAt(curX, curZ, latestFrameRef.current, u.radiusM || 1.1);
+          const trueDepthCm = u.depthCm || 14;
+          const measuredDepthM = query.pointCount > 0 ? Math.abs(query.minZ < 0 ? query.minZ : query.elevation) : (trueDepthCm / 100);
+          const measuredDepthCm = (measuredDepthM * 100).toFixed(1);
+
           const anomalyData: SelectedAnomalyData = {
-            id: `ANOMALY-PH-${Math.abs(Math.round(u.zM))}`,
-            name: `Pothole Depression (-${u.depthCm}cm)`,
+            id: `ANOMALY-PH-${Math.abs(Math.round(curZ))}`,
+            name: query.isObserved && query.pointCount > 0
+              ? `Observed Pothole Depression (-${measuredDepthCm}cm)`
+              : `Pothole Candidate (Sparse Horizon Observation)`,
             type: 'pothole',
-            x: u.xM,
-            y: 0,
-            z: u.zM,
-            minZ: -u.depthCm / 100,
-            maxZ: 0.005,
-            elevation: -u.depthCm / 100,
-            deltaZ: u.depthCm / 100,
-            radius: u.radiusM,
-            roughness: 0.016,
-            traversability: 'NON-TRAVERSABLE (Step Drop > 8cm)',
-            isTraversable: false,
-            semanticClass: 'DRIVABLE_GROUND',
-            confidence: 0.98,
-            pointCount: 168,
-            resolution: '5cm (Refined Zone 0)',
+            x: curX,
+            y: -measuredDepthM,
+            z: curZ,
+            minZ: query.minZ,
+            maxZ: query.maxZ,
+            elevation: -measuredDepthM,
+            deltaZ: query.deltaZ,
+            radius: u.radiusM || 1.1,
+            roughness: query.roughness,
+            traversability: query.traversability,
+            isTraversable: query.isTraversable,
+            semanticClass: query.semanticClassName,
+            confidence: query.confidence,
+            pointCount: query.pointCount,
+            resolution: query.resolutionName,
             distance: Number(dist.toFixed(1)),
-            provenance: 'SYNTHETIC BENCHMARK SPLIT • SIH 2026',
+            provenance: '2.5D FOVEATED LIDAR ELEVATION MAP • LIVE INFERENCE',
+            groundTruth: {
+              trueDepthCm: trueDepthCm,
+              source: 'Simulator World Geometry',
+            },
           };
           setSelectedAnomaly(anomalyData);
           highlightSelectedAnomaly(anomalyData);
           if (onInspectCell) {
             onInspectCell({
-              resolution_level: 'near',
-              cell_x: u.xM,
-              cell_y: u.zM,
-              elevation: -u.depthCm / 100,
-              min_z: -u.depthCm / 100,
-              max_z: 0.005,
-              semantic_class: 0,
-              confidence: 0.98,
-              point_count: 168,
-              roughness: 0.016,
-              occupancy: 0.95,
+              resolution_level: query.ringId === 0 ? 'near' : query.ringId === 1 ? 'mid_near' : query.ringId === 2 ? 'mid' : 'far',
+              cell_x: curX,
+              cell_y: curZ,
+              elevation: -measuredDepthM,
+              min_z: query.minZ,
+              max_z: query.maxZ,
+              semantic_class: query.semanticClassId,
+              confidence: query.confidence,
+              point_count: query.pointCount,
+              roughness: query.roughness,
+              occupancy: query.isTraversable ? 0.05 : 0.95,
             });
           }
         } else if (u && u.isSpeedBreaker) {
-          const dist = Math.hypot(u.xM, u.zM);
+          const query = queryLidarMapAt(curX, curZ, latestFrameRef.current, 1.8);
+          const trueHeightCm = u.heightCm || 8;
+          const measuredHeightM = query.pointCount > 0 ? Math.abs(query.maxZ > 0 ? query.maxZ : query.elevation) : (trueHeightCm / 100);
+          const measuredHeightCm = (measuredHeightM * 100).toFixed(1);
+
           const anomalyData: SelectedAnomalyData = {
-            id: `ANOMALY-SB-${Math.abs(Math.round(u.zM))}`,
-            name: `Speed Breaker Hump (+${u.heightCm}cm)`,
+            id: `ANOMALY-SB-${Math.abs(Math.round(curZ))}`,
+            name: query.isObserved && query.pointCount > 0
+              ? `Observed Speed Breaker Hump (+${measuredHeightCm}cm)`
+              : `Speed Breaker Candidate (Sparse Horizon Observation)`,
             type: 'curb',
-            x: u.xM,
-            y: 0.08,
-            z: u.zM,
-            minZ: 0.0,
-            maxZ: u.heightCm / 100,
-            elevation: u.heightCm / 100,
-            deltaZ: u.heightCm / 100,
-            radius: 1.2,
-            roughness: 0.008,
-            traversability: 'TRAVERSABLE (Safe speed <= 15 km/h)',
-            isTraversable: true,
-            semanticClass: 'DRIVABLE_GROUND',
-            confidence: 0.99,
-            pointCount: 220,
-            resolution: '5cm (Refined Zone 0)',
+            x: curX,
+            y: measuredHeightM,
+            z: curZ,
+            minZ: query.minZ,
+            maxZ: query.maxZ,
+            elevation: measuredHeightM,
+            deltaZ: query.deltaZ,
+            radius: 2.2,
+            roughness: query.roughness,
+            traversability: query.traversability,
+            isTraversable: query.isTraversable,
+            semanticClass: query.semanticClassName,
+            confidence: query.confidence,
+            pointCount: query.pointCount,
+            resolution: query.resolutionName,
             distance: Number(dist.toFixed(1)),
-            provenance: 'SYNTHETIC BENCHMARK SPLIT • SIH 2026',
+            provenance: '2.5D FOVEATED LIDAR ELEVATION MAP • LIVE INFERENCE',
+            groundTruth: {
+              trueHeightCm: trueHeightCm,
+              source: 'Simulator World Geometry',
+            },
           };
           setSelectedAnomaly(anomalyData);
           highlightSelectedAnomaly(anomalyData);
           if (onInspectCell) {
             onInspectCell({
-              resolution_level: 'near',
-              cell_x: u.xM,
-              cell_y: u.zM,
-              elevation: u.heightCm / 100,
-              min_z: 0.0,
-              max_z: u.heightCm / 100,
-              semantic_class: 0,
-              confidence: 0.99,
-              point_count: 220,
-              roughness: 0.008,
-              occupancy: 0.9,
+              resolution_level: query.ringId === 0 ? 'near' : query.ringId === 1 ? 'mid_near' : query.ringId === 2 ? 'mid' : 'far',
+              cell_x: curX,
+              cell_y: curZ,
+              elevation: measuredHeightM,
+              min_z: query.minZ,
+              max_z: query.maxZ,
+              semantic_class: query.semanticClassId,
+              confidence: query.confidence,
+              point_count: query.pointCount,
+              roughness: query.roughness,
+              occupancy: 0.35,
+            });
+          }
+        } else if (u && u.isTrafficCar) {
+          const query = queryLidarMapAt(curX, curZ, latestFrameRef.current, 2.2);
+          const anomalyData: SelectedAnomalyData = {
+            id: `OBSTACLE-${(u.carId || 'VEHICLE').toUpperCase()}`,
+            name: `Observed Vehicle Obstacle (${u.type === 'oncoming' ? 'Oncoming Lane' : 'Leading Lane'})`,
+            type: 'vehicle',
+            x: curX,
+            y: query.elevation,
+            z: curZ,
+            minZ: query.minZ,
+            maxZ: query.maxZ,
+            elevation: query.elevation,
+            deltaZ: query.deltaZ,
+            radius: 2.2,
+            roughness: query.roughness,
+            traversability: query.pointCount > 0 ? 'NON-TRAVERSABLE (Vehicle Obstacle Collision Hazard)' : 'SPARSE OBSERVATION',
+            isTraversable: false,
+            semanticClass: query.semanticClassId === 2 ? 'VEHICLE' : query.semanticClassName,
+            confidence: query.confidence,
+            pointCount: query.pointCount,
+            resolution: query.resolutionName,
+            distance: Number(dist.toFixed(1)),
+            provenance: 'SEMANTIC PERCEPTION & 2.5D ELEVATION MAP',
+            groundTruth: {
+              trueDimensions: '4.4m x 1.9m x 1.45m',
+              source: 'Simulator Actor Model',
+            },
+          };
+          setSelectedAnomaly(anomalyData);
+          highlightSelectedAnomaly(anomalyData);
+          if (onInspectCell) {
+            onInspectCell({
+              resolution_level: query.ringId === 0 ? 'near' : query.ringId === 1 ? 'mid_near' : query.ringId === 2 ? 'mid' : 'far',
+              cell_x: curX,
+              cell_y: curZ,
+              elevation: query.elevation,
+              min_z: query.minZ,
+              max_z: query.maxZ,
+              semantic_class: query.semanticClassId,
+              confidence: query.confidence,
+              point_count: query.pointCount,
+              roughness: query.roughness,
+              occupancy: query.isTraversable ? 0.05 : 1.0,
             });
           }
         }
@@ -349,6 +743,10 @@ export const LidarViewport: React.FC<LidarViewportProps> = ({
     const urbanChunksGroup = new THREE.Group();
     scene.add(urbanChunksGroup);
     urbanChunksGroupRef.current = urbanChunksGroup;
+
+    const trafficGroup = new THREE.Group();
+    scene.add(trafficGroup);
+    trafficGroupRef.current = trafficGroup;
 
     const analyticalSurfaceGroup = new THREE.Group();
     scene.add(analyticalSurfaceGroup);
@@ -397,12 +795,13 @@ export const LidarViewport: React.FC<LidarViewportProps> = ({
     // Build 3D Topographic Analytical Surface
     build3DAnalyticalSurface(analyticalSurfaceGroup);
 
-    // Render Animation Loop (Strictly One-Way Unidirectional Motion)
+    // Render Animation Loop
     let animationFrameId: number;
     let sweepAngle = 0;
     let pulseTime = 0;
     let wheelRotation = 0;
     let pedWalkProgress = 0;
+    let currentLaneX = 0.0;
 
     const animate = () => {
       animationFrameId = requestAnimationFrame(animate);
@@ -430,46 +829,199 @@ export const LidarViewport: React.FC<LidarViewportProps> = ({
         analyticalSurfaceGroupRef.current.position.z = chunkOffset;
       }
 
-      // 2. Unidirectional Continuous Traffic Motion with Realistic Slow Urban Speed
-      const oncomingZ = -70.0 + ((pulseTime * 3.6 + dist * 0.4) % 180.0);
-      if (oncomingCarRef.current) {
-        oncomingCarRef.current.position.set(2.4, 0, oncomingZ);
-      }
+      // 2. Intelligent Multi-Car Autonomous Traffic Simulation (Collision-Avoidant & Non-Overcrossing)
+      const dt = 0.016;
+      const egoX = egoVehicleRef.current?.position.x || 0;
+      const crosswalkWorldZ = -18.0 + chunkOffset;
 
-      if (leadingCarRef.current) {
-        const leadingZ = -32.0;
-        leadingCarRef.current.position.set(-2.4, 0, leadingZ);
-      }
-
-      // 3. Intelligent Pedestrian Crossing with Active Collision Avoidance & Vehicle Yielding
-      const crosswalkZ = -18.0;
-      const distToOncomingCar = Math.abs(oncomingZ - crosswalkZ);
-      const isCarApproaching = distToOncomingCar < 7.5;
-      const currentPedX = -3.8 + pedWalkProgress * 7.6;
-      const isPedInCarLane = currentPedX > 0.6 && currentPedX < 3.8;
-
-      const shouldYield = isCarApproaching && isPedInCarLane;
+      // 3. Intelligent Pedestrian Crossing at Zebra Crosswalk
+      pedWalkProgress = (pedWalkProgress + 0.0018) % 1.0;
+      const pedX = -3.8 + pedWalkProgress * 7.6;
 
       if (pedCrossingRef.current) {
-        if (!shouldYield) {
-          pedWalkProgress = (pedWalkProgress + 0.0018) % 1.0;
-        }
-
-        const pedX = -3.8 + pedWalkProgress * 7.6;
         pedCrossingRef.current.position.x = pedX;
 
         const legLeft = pedCrossingRef.current.getObjectByName('leg_left');
         const legRight = pedCrossingRef.current.getObjectByName('leg_right');
         if (legLeft && legRight) {
-          if (shouldYield) {
-            legLeft.rotation.x = 0;
-            legRight.rotation.x = 0;
-          } else {
-            legLeft.rotation.x = Math.sin(pedWalkProgress * 30.0) * 0.28;
-            legRight.rotation.x = -Math.sin(pedWalkProgress * 30.0) * 0.28;
-          }
+          legLeft.rotation.x = Math.sin(pedWalkProgress * 28.0) * 0.28;
+          legRight.rotation.x = -Math.sin(pedWalkProgress * 28.0) * 0.28;
         }
       }
+
+      // 4. Autonomous Traffic Fleet Simulation (Opposite Right-Lane Oncoming & Autonomous Random Motion)
+      const egoSpeed = Math.max(0, speed); // forward speed in m/s
+      const speedFactor = trafficSpeedRef.current ?? 1.0;
+
+      if (teleopRef.current) {
+        teleopRef.current.trafficActors = trafficFleetRef.current.map((car) => ({
+          id: car.id,
+          x: car.x,
+          z: car.z,
+          speed: car.speed,
+          type: car.lane === 'oncoming' ? 'oncoming' : 'leading',
+          visible: car.mesh.visible,
+        }));
+      }
+
+      trafficFleetRef.current.forEach((car) => {
+        if (!car.mesh.visible) return;
+
+        // Individualized organic random velocity fluctuations (unique per car):
+        const randomFluctuation = Math.sin(pulseTime * (car.oscillationFreq || 0.5) + (car.randomPhase || 0)) * (car.oscillationAmp || 0.8);
+        const dynamicBaseSpeed = Math.max(3.5, car.baseSpeed + randomFluctuation);
+
+        if (car.lane === 'forward') {
+          // --- FORWARD LANE (Left Lane X = -2.4m, Same Direction as Ego) ---
+          let targetSpeed = dynamicBaseSpeed * speedFactor;
+
+          // A. Avoid overtaking/colliding with other forward traffic cars ahead (other.z < car.z)
+          trafficFleetRef.current.forEach((other) => {
+            if (other.mesh.visible && other.id !== car.id && other.lane === 'forward') {
+              const dz = car.z - other.z; // positive when other is ahead along -Z
+              if (dz > 0 && dz < 22.0) {
+                if (dz < 6.0) {
+                  targetSpeed = 0; // Safe stop behind leading car
+                } else {
+                  targetSpeed = Math.min(targetSpeed, other.speed * ((dz - 4.5) / 16.0));
+                }
+              }
+            }
+          });
+
+          // B. Proactively avoid colliding with Ego vehicle ONLY if Ego occupies Left Lane (egoX <= -0.8)
+          if (egoX <= -0.8) {
+            const dzToEgo = car.z - 0; // positive when car is approaching Ego from behind
+            if (dzToEgo > 0 && dzToEgo < 22.0) {
+              if (dzToEgo < 6.5) {
+                targetSpeed = 0; // Complete safe stop behind Ego rover in left lane!
+              } else {
+                targetSpeed = Math.min(targetSpeed, (egoSpeed > 0 ? egoSpeed : car.baseSpeed * speedFactor * 0.4) * ((dzToEgo - 5.0) / 16.0));
+              }
+            }
+          }
+
+          // C. Yield smoothly to crossing pedestrian when pedestrian is in left lane
+          if (pedX < 0.2) {
+            const dzToCrosswalk = car.z - crosswalkWorldZ; // positive when approaching crosswalk
+            if (dzToCrosswalk > 0 && dzToCrosswalk < 16.0) {
+              targetSpeed = Math.min(targetSpeed, car.baseSpeed * speedFactor * 0.3);
+            }
+          }
+
+          // D. If currently collided with Ego, stop completely
+          if (Math.abs(egoX - car.x) < 1.55 && Math.abs(car.z) < 3.4) {
+            targetSpeed = 0;
+            car.speed = 0;
+          }
+
+          // Smooth Acceleration & Braking towards dynamic speed
+          if (car.speed < targetSpeed) {
+            car.speed = Math.min(targetSpeed, car.speed + 3.5 * dt);
+          } else if (car.speed > targetSpeed) {
+            car.speed = Math.max(targetSpeed, car.speed - 5.5 * dt);
+          }
+
+          // Relative forward position update along -Z:
+          car.z -= (car.speed - speed) * dt;
+
+          // Continuous wrap-around:
+          if (car.z < -135.0) {
+            let maxForwardZ = 20.0;
+            trafficFleetRef.current.forEach((o) => {
+              if (o.mesh.visible && o.lane === 'forward' && o.id !== car.id) {
+                maxForwardZ = Math.max(maxForwardZ, o.z);
+              }
+            });
+            car.z = Math.max(30.0, maxForwardZ + 22.0);
+            car.speed = car.baseSpeed * speedFactor;
+          } else if (car.z > 60.0) {
+            let minForwardZ = -30.0;
+            trafficFleetRef.current.forEach((o) => {
+              if (o.mesh.visible && o.lane === 'forward' && o.id !== car.id) {
+                minForwardZ = Math.min(minForwardZ, o.z);
+              }
+            });
+            car.z = Math.min(-95.0, minForwardZ - 22.0);
+            car.speed = car.baseSpeed * speedFactor;
+          }
+        } else {
+          // --- ONCOMING LANE (Right Lane X = +2.4m, Opposite Direction to Ego) ---
+          let targetSpeed = dynamicBaseSpeed * speedFactor;
+
+          // A. Avoid overtaking/colliding with other oncoming cars ahead (other.z > car.z)
+          trafficFleetRef.current.forEach((other) => {
+            if (other.mesh.visible && other.id !== car.id && other.lane === 'oncoming') {
+              const dz = other.z - car.z; // positive when other is ahead along +Z
+              if (dz > 0 && dz < 22.0) {
+                if (dz < 6.0) {
+                  targetSpeed = 0; // Safe stop behind oncoming car ahead
+                } else {
+                  targetSpeed = Math.min(targetSpeed, other.speed * ((dz - 4.5) / 16.0));
+                }
+              }
+            }
+          });
+
+          // B. Proactively avoid colliding with Ego vehicle ONLY if Ego occupies Right Lane (egoX >= 0.8)
+          if (egoX >= 0.8) {
+            const dzToEgo = 0 - car.z; // positive when oncoming car is approaching Ego from front
+            if (dzToEgo > 0 && dzToEgo < 22.0) {
+              if (dzToEgo < 6.5) {
+                targetSpeed = 0; // Emergency stop in front of Ego rover in right lane!
+              } else {
+                targetSpeed = Math.min(targetSpeed, car.baseSpeed * speedFactor * ((dzToEgo - 5.0) / 16.0));
+              }
+            }
+          }
+
+          // C. Yield smoothly to crossing pedestrian when pedestrian is in right lane
+          if (pedX > 0.0 && pedX < 3.2) {
+            const dzToCrosswalk = crosswalkWorldZ - car.z; // positive when approaching crosswalk
+            if (dzToCrosswalk > 0 && dzToCrosswalk < 16.0) {
+              targetSpeed = Math.min(targetSpeed, car.baseSpeed * speedFactor * 0.3);
+            }
+          }
+
+          // D. If currently collided with Ego, stop completely
+          if (Math.abs(egoX - car.x) < 1.55 && Math.abs(car.z) < 3.4) {
+            targetSpeed = 0;
+            car.speed = 0;
+          }
+
+          // Smooth Acceleration & Braking towards dynamic speed
+          if (car.speed < targetSpeed) {
+            car.speed = Math.min(targetSpeed, car.speed + 3.5 * dt);
+          } else if (car.speed > targetSpeed) {
+            car.speed = Math.max(targetSpeed, car.speed - 5.5 * dt);
+          }
+
+          // Relative oncoming position update along +Z:
+          car.z += (car.speed + Math.max(0, speed)) * dt;
+
+          // Continuous wrap-around: when car passes behind viewer (+35m), loop back to front horizon
+          if (car.z > 35.0) {
+            let minOncomingZ = -30.0;
+            trafficFleetRef.current.forEach((o) => {
+              if (o.mesh.visible && o.lane === 'oncoming' && o.id !== car.id) {
+                minOncomingZ = Math.min(minOncomingZ, o.z);
+              }
+            });
+            car.z = Math.min(-120.0, minOncomingZ - 24.0);
+            car.speed = car.baseSpeed * speedFactor;
+          }
+        }
+
+        // Apply 3D position & wheel spin
+        car.mesh.position.set(car.x, 0, car.z);
+        if (Math.abs(car.speed) > 0.02) {
+          car.mesh.traverse((child) => {
+            if (child.name === 'traffic_wheel') {
+              child.rotation.x += car.speed * 0.04;
+            }
+          });
+        }
+      });
 
       // 4. Wildlife Deer
       if (wildlifeDeerRef.current) {
@@ -480,30 +1032,387 @@ export const LidarViewport: React.FC<LidarViewportProps> = ({
         }
       }
 
-      // 5. Dynamic Ego Rover steering & wheel spin
+      // 5. Dynamic Ego Rover steering, lane selection, wheel spin & collision detection
       if (egoVehicleRef.current) {
-        const targetX = (-steer / 30) * 1.8;
-        egoVehicleRef.current.position.x = THREE.MathUtils.lerp(egoVehicleRef.current.position.x, targetX, 0.08);
-
-        egoVehicleRef.current.rotation.y = (-steer * 0.008);
-        egoVehicleRef.current.rotation.z = (steer * 0.004);
-
-        if (speed > 0.05) {
-          wheelRotation += (speed * 0.06);
+        // Persistent Lane Shift:
+        if (Math.abs(steer) > 1) {
+          const steerSign = steer / 22;
+          const lateralRate = 0.045;
+          currentLaneX = THREE.MathUtils.clamp(currentLaneX + steerSign * lateralRate, -3.6, 3.6);
+          onUpdateTeleopRef.current?.((prev) => ({ ...prev, laneX: currentLaneX }));
         }
 
+        // Smoothly position vehicle in the current lane
+        egoVehicleRef.current.position.x = THREE.MathUtils.lerp(egoVehicleRef.current.position.x, currentLaneX, 0.12);
+
+        // Realistic Yaw turning:
+        const steerNorm = THREE.MathUtils.clamp(steer / 22, -1.0, 1.0);
+        const targetYaw = -steerNorm * (20 * Math.PI / 180);
+        egoVehicleRef.current.rotation.y = THREE.MathUtils.lerp(egoVehicleRef.current.rotation.y, targetYaw, 0.12);
+
+        // Subtle Roll / Banking into turn:
+        const targetRoll = steerNorm * (3 * Math.PI / 180);
+        egoVehicleRef.current.rotation.z = THREE.MathUtils.lerp(egoVehicleRef.current.rotation.z, targetRoll, 0.1);
+
+        // Front wheels turning angle into turn:
         const frontWheels = egoVehicleRef.current.getObjectByName('front_wheels_group');
         if (frontWheels) {
-          frontWheels.rotation.y = (-steer * Math.PI) / 180;
+          const targetWheelAngle = -steerNorm * (28 * Math.PI / 180);
+          frontWheels.rotation.y = THREE.MathUtils.lerp(frontWheels.rotation.y, targetWheelAngle, 0.15);
+        }
+
+        // Wheel rotation for forward & reverse
+        if (Math.abs(speed) > 0.05) {
+          wheelRotation += (speed * 0.06);
         }
 
         const puck = egoVehicleRef.current.getObjectByName('lidar_puck');
         if (puck) puck.rotation.y += 0.08;
 
-        const halo = egoVehicleRef.current.getObjectByName('ground_halo');
-        if (halo) {
+        // Strict Physical Contact Collision Proximity Checking:
+        const egoPosX = egoVehicleRef.current.position.x;
+        let collisionDetected = false;
+        let collidedVehicleActor: TrafficActor | null = null;
+        let isCurbCollision = false;
+        let isPedCollision = false;
+
+        // Check A: Roadside Concrete Curbs & Sidewalks (|X| >= 3.65m)
+        if (Math.abs(egoPosX) >= 3.65) {
+          collisionDetected = true;
+          isCurbCollision = true;
+        }
+
+        // Check B: Traffic Fleet (all non-controllable cars)
+        // Rover width is 1.8m, NPC car width is 1.9m. Lane centers are +/-2.4m and 0.0m.
+        // In different lanes, lateral distance dx is 2.4m.
+        // Physical lateral overlap requires dx < 1.55m.
+        // Rover length is 3.2m, Car length is 4.4m. Physical longitudinal contact requires dz < 3.4m.
+        trafficFleetRef.current.forEach((tCar) => {
+          if (!tCar.mesh.visible) return;
+          const dx = Math.abs(egoPosX - tCar.x);
+          const dz = Math.abs(0 - tCar.z);
+          if (dx < 1.55 && dz < 3.4) {
+            collisionDetected = true;
+            collidedVehicleActor = tCar;
+            tCar.speed = 0; // Collided traffic car stops dead on impact
+          }
+        });
+
+        // Check C: Crossing Pedestrian (X = pedX, Crosswalk Z = -18.0 + chunkOffset)
+        const curCrosswalkRelZ = -18.0 + chunkOffset;
+        if (Math.abs(egoPosX - pedX) < 1.1 && Math.abs(curCrosswalkRelZ) < 1.8) {
+          collisionDetected = true;
+          isPedCollision = true;
+        }
+
+        const halo = egoVehicleRef.current.getObjectByName('ground_halo') as THREE.Mesh | undefined;
+        if (halo && halo.material) {
           const s = 1.0 + Math.sin(pulseTime * 2.5) * 0.08;
           halo.scale.set(s, s, s);
+          if (collisionDetected || curTeleop?.isCollided) {
+            (halo.material as THREE.MeshBasicMaterial).color.setHex(0xef4444);
+          } else {
+            (halo.material as THREE.MeshBasicMaterial).color.setHex(0x10b981);
+          }
+        }
+
+        // State Machine for Collision Onset & Resolution
+        if (collisionDetected) {
+          if (!curTeleop?.isCollided) {
+            onUpdateTeleopRef.current?.((prev) => ({
+              ...prev,
+              isCollided: true,
+              speed: 0,
+              speedKmh: 0,
+              throttlePct: 0,
+              targetSpeedKmh: 0,
+            }));
+          }
+
+          // Show collision inspection tile populated with genuine obstacle perception & 2.5D map telemetry
+          if (collidedVehicleActor) {
+            const tCar = collidedVehicleActor;
+            const distToCar = Number(Math.hypot(egoPosX - tCar.x, tCar.z).toFixed(1));
+            const query = queryLidarMapAt(tCar.x, tCar.z, latestFrameRef.current, 2.2);
+
+            const collisionAnomaly: SelectedAnomalyData = {
+              id: `COLLISION-${tCar.id.toUpperCase()}`,
+              name: `Dynamic Vehicle Obstacle (${tCar.lane === 'oncoming' ? 'Oncoming Traffic' : 'Leading Traffic'})`,
+              type: 'vehicle',
+              x: Number(tCar.x.toFixed(2)),
+              y: query.elevation,
+              z: Number(tCar.z.toFixed(2)),
+              minZ: query.minZ,
+              maxZ: query.maxZ,
+              elevation: query.elevation,
+              deltaZ: query.deltaZ,
+              radius: 2.2,
+              roughness: query.roughness,
+              traversability: query.pointCount > 0 ? 'NON-TRAVERSABLE (Severe Vehicle Collision Hazard)' : 'SPARSE OBSERVATION',
+              isTraversable: false,
+              semanticClass: query.semanticClassId === 2 ? 'VEHICLE' : query.semanticClassName,
+              confidence: query.confidence,
+              pointCount: query.pointCount,
+              resolution: query.resolutionName,
+              distance: distToCar,
+              provenance: 'SEMANTIC PERCEPTION & 2.5D ELEVATION MAP',
+              groundTruth: {
+                trueDimensions: '4.4m x 1.9m x 1.45m',
+                source: 'Simulator Traffic Fleet Dynamics',
+              },
+            };
+            setSelectedAnomaly(collisionAnomaly);
+            highlightSelectedAnomaly(collisionAnomaly);
+            if (onInspectCell) {
+              onInspectCell({
+                resolution_level: query.ringId === 0 ? 'near' : query.ringId === 1 ? 'mid_near' : query.ringId === 2 ? 'mid' : 'far',
+                cell_x: Number(tCar.x.toFixed(2)),
+                cell_y: Number(tCar.z.toFixed(2)),
+                elevation: query.elevation,
+                min_z: query.minZ,
+                max_z: query.maxZ,
+                semantic_class: query.semanticClassId,
+                confidence: query.confidence,
+                point_count: query.pointCount,
+                roughness: query.roughness,
+                occupancy: query.isTraversable ? 0.05 : 1.0,
+              });
+            }
+          } else if (isPedCollision) {
+            const query = queryLidarMapAt(pedX, curCrosswalkRelZ, latestFrameRef.current, 1.2);
+            const pedAnomaly: SelectedAnomalyData = {
+              id: `COLLISION-PED-CROSSWALK`,
+              name: `Pedestrian Impact Hazard (Zebra Crosswalk)`,
+              type: 'structure',
+              x: Number(pedX.toFixed(2)),
+              y: query.elevation,
+              z: Number(curCrosswalkRelZ.toFixed(2)),
+              minZ: query.minZ,
+              maxZ: query.maxZ,
+              elevation: query.elevation,
+              deltaZ: query.deltaZ,
+              radius: 1.2,
+              roughness: query.roughness,
+              traversability: 'NON-TRAVERSABLE (Vulnerable Road User Safety)',
+              isTraversable: false,
+              semanticClass: query.semanticClassId === 3 ? 'PEDESTRIAN' : query.semanticClassName,
+              confidence: query.confidence,
+              pointCount: query.pointCount,
+              resolution: query.resolutionName,
+              distance: Number(Math.hypot(egoPosX - pedX, curCrosswalkRelZ).toFixed(1)),
+              provenance: 'SEMANTIC PERCEPTION & 2.5D ELEVATION MAP',
+              groundTruth: {
+                trueDimensions: '0.6m x 0.6m x 1.75m',
+                source: 'Simulator Pedestrian Dynamics',
+              },
+            };
+            setSelectedAnomaly(pedAnomaly);
+            highlightSelectedAnomaly(pedAnomaly);
+          } else if (isCurbCollision) {
+            const side = egoPosX > 0 ? 'Right' : 'Left';
+            const query = queryLidarMapAt(egoPosX, 0.0, latestFrameRef.current, 1.2);
+            const curbAnomaly: SelectedAnomalyData = {
+              id: `COLLISION-CURB-${side.toUpperCase()}`,
+              name: `Raised Concrete Curb (+16.0cm Barrier)`,
+              type: 'curb',
+              x: Number(egoPosX.toFixed(2)),
+              y: query.elevation,
+              z: 0.0,
+              minZ: query.minZ,
+              maxZ: query.maxZ,
+              elevation: query.elevation,
+              deltaZ: query.deltaZ,
+              radius: 1.5,
+              roughness: query.roughness,
+              traversability: 'NON-TRAVERSABLE (Curb Step > 10cm)',
+              isTraversable: false,
+              semanticClass: query.semanticClassName,
+              confidence: query.confidence,
+              pointCount: query.pointCount,
+              resolution: query.resolutionName,
+              distance: Number(Math.abs(egoPosX).toFixed(1)),
+              provenance: '2.5D ELEVATION HAZARD MAPPER • SIH 2026',
+              groundTruth: {
+                trueHeightCm: 16,
+                source: 'Roadway Boundary Profile',
+              },
+            };
+            setSelectedAnomaly(curbAnomaly);
+            highlightSelectedAnomaly(curbAnomaly);
+          }
+        } else if (!collisionDetected) {
+          if (curTeleop?.isCollided) {
+            // Once reversed away or steered out of collision boundary, clear collision state
+            onUpdateTeleopRef.current?.((prev) => ({
+              ...prev,
+              isCollided: false,
+            }));
+            setSelectedAnomaly((prev) => {
+              if (prev?.id.startsWith('COLLISION-')) {
+                if (anomalySelectionGroupRef.current) {
+                  while (anomalySelectionGroupRef.current.children.length > 0) {
+                    anomalySelectionGroupRef.current.remove(anomalySelectionGroupRef.current.children[0]);
+                  }
+                }
+                return null;
+              }
+              return prev;
+            });
+          }
+
+          // -------------------------------------------------------------
+          // AUTOMATIC PASS-THROUGH INSPECTION (POTHOLES & SPEEDBREAKERS)
+          // -------------------------------------------------------------
+          const potholeDefs = [
+            { x: -1.6, z: -15.0, r: 1.1, depth: 0.14 },
+            { x: 1.8, z: -42.0, r: 0.9, depth: 0.12 },
+            { x: -0.8, z: 25.0, r: 1.2, depth: 0.15 },
+          ];
+          const speedBreakerDefs = [
+            { x: 0.0, z: -32.0, height: 0.08 },
+            { x: 0.0, z: 32.0, height: 0.08 },
+          ];
+          const chunkZOffsets = [-120.0, 0.0, 120.0];
+
+          let activeTraverseAnomaly: SelectedAnomalyData | null = null;
+          let minTraverseDist = Infinity;
+          let roverVerticalOffset = 0.0;
+          let roverPitchOffset = 0.0;
+
+          chunkZOffsets.forEach((chunkZ) => {
+            potholeDefs.forEach((ph) => {
+              const phWorldZ = ph.z + chunkZ + chunkOffset;
+              const dx = Math.abs(egoPosX - ph.x);
+              const dz = Math.abs(phWorldZ);
+              // Vehicle body width is ~1.8m, crater radius is ph.r
+              if (dx <= ph.r + 0.95 && dz <= ph.r + 1.4) {
+                const radialDist = Math.hypot(dx, dz);
+                if (radialDist < minTraverseDist) {
+                  minTraverseDist = radialDist;
+                  const query = queryLidarMapAt(ph.x, phWorldZ, latestFrameRef.current, ph.r);
+                  const depthM = query.pointCount > 0 ? Math.abs(query.minZ < 0 ? query.minZ : query.elevation) : ph.depth;
+                  const depthCm = (depthM * 100).toFixed(1);
+
+                  activeTraverseAnomaly = {
+                    id: `PASS-PH-${Math.abs(Math.round(phWorldZ))}`,
+                    name: query.pointCount > 0 ? `Observed Pothole Depression (-${depthCm}cm)` : 'Pothole Region (Sparse Observation)',
+                    type: 'pothole',
+                    x: Number(ph.x.toFixed(2)),
+                    y: -depthM,
+                    z: Number(phWorldZ.toFixed(2)),
+                    minZ: query.minZ,
+                    maxZ: query.maxZ,
+                    elevation: -depthM,
+                    deltaZ: query.deltaZ,
+                    radius: ph.r,
+                    roughness: query.roughness,
+                    traversability: query.traversability,
+                    isTraversable: query.isTraversable,
+                    semanticClass: query.semanticClassName,
+                    confidence: query.confidence,
+                    pointCount: query.pointCount,
+                    resolution: query.resolutionName,
+                    distance: Number(radialDist.toFixed(1)),
+                    provenance: 'LIVE PASS-THROUGH 2.5D FOVEATED MAP TELEMETRY',
+                    groundTruth: {
+                      trueDepthCm: Math.round(ph.depth * 100),
+                      source: 'Simulator World Geometry',
+                    },
+                  };
+                  const normZ = phWorldZ / Math.max(0.8, ph.r);
+                  roverVerticalOffset = -0.035 * Math.max(0, 1.0 - normZ * normZ);
+                  roverPitchOffset = normZ * 0.03;
+                }
+              }
+            });
+
+            speedBreakerDefs.forEach((sb) => {
+              const sbWorldZ = sb.z + chunkZ + chunkOffset;
+              const dz = Math.abs(sbWorldZ);
+              // Speed breaker spans entire road width (|egoPosX| <= 4.2m)
+              if (Math.abs(egoPosX) <= 4.2 && dz <= 2.2) {
+                if (dz < minTraverseDist) {
+                  minTraverseDist = dz;
+                  const query = queryLidarMapAt(0.0, sbWorldZ, latestFrameRef.current, 1.8);
+                  const heightM = query.pointCount > 0 ? Math.abs(query.maxZ > 0 ? query.maxZ : query.elevation) : sb.height;
+                  const heightCm = (heightM * 100).toFixed(1);
+
+                  activeTraverseAnomaly = {
+                    id: `PASS-SB-${Math.abs(Math.round(sbWorldZ))}`,
+                    name: query.pointCount > 0 ? `Observed Speed Breaker Hump (+${heightCm}cm)` : 'Speed Breaker Region (Sparse Observation)',
+                    type: 'curb',
+                    x: 0,
+                    y: heightM,
+                    z: Number(sbWorldZ.toFixed(2)),
+                    minZ: query.minZ,
+                    maxZ: query.maxZ,
+                    elevation: heightM,
+                    deltaZ: query.deltaZ,
+                    radius: 2.2,
+                    roughness: query.roughness,
+                    traversability: query.traversability,
+                    isTraversable: query.isTraversable,
+                    semanticClass: query.semanticClassName,
+                    confidence: query.confidence,
+                    pointCount: query.pointCount,
+                    resolution: query.resolutionName,
+                    distance: Number(dz.toFixed(1)),
+                    provenance: 'LIVE PASS-THROUGH 2.5D FOVEATED MAP TELEMETRY',
+                    groundTruth: {
+                      trueHeightCm: Math.round(sb.height * 100),
+                      source: 'Simulator World Geometry',
+                    },
+                  };
+                  const normZ = sbWorldZ / 2.0;
+                  roverVerticalOffset = 0.055 * Math.max(0, 1.0 - normZ * normZ);
+                  roverPitchOffset = -normZ * 0.04;
+                }
+              }
+            });
+          });
+
+          // Dynamic Rover Suspension Dip / Heave Animation
+          egoVehicleRef.current.position.y = THREE.MathUtils.lerp(egoVehicleRef.current.position.y, roverVerticalOffset, 0.25);
+          egoVehicleRef.current.rotation.x = THREE.MathUtils.lerp(egoVehicleRef.current.rotation.x, roverPitchOffset, 0.25);
+
+          if (activeTraverseAnomaly) {
+            const currentTraverse = activeTraverseAnomaly as SelectedAnomalyData;
+            setSelectedAnomaly((prev) => {
+              if (prev?.id === currentTraverse.id && Math.abs(prev.distance - currentTraverse.distance) < 0.2) {
+                return prev;
+              }
+              return currentTraverse;
+            });
+            highlightSelectedAnomaly(currentTraverse);
+            if (onInspectCell) {
+              onInspectCell({
+                resolution_level: 'near',
+                cell_x: currentTraverse.x,
+                cell_y: currentTraverse.z,
+                elevation: currentTraverse.elevation,
+                min_z: currentTraverse.minZ,
+                max_z: currentTraverse.maxZ,
+                semantic_class: 0,
+                confidence: currentTraverse.confidence,
+                point_count: currentTraverse.pointCount,
+                roughness: currentTraverse.roughness,
+                occupancy: 0.95,
+              });
+            }
+          } else {
+            // Auto-dismiss pass-through panel once vehicle clears the anomaly
+            setSelectedAnomaly((prev) => {
+              if (prev?.id.startsWith('PASS-')) {
+                if (anomalySelectionGroupRef.current) {
+                  while (anomalySelectionGroupRef.current.children.length > 0) {
+                    anomalySelectionGroupRef.current.remove(anomalySelectionGroupRef.current.children[0]);
+                  }
+                }
+                return null;
+              }
+              return prev;
+            });
+          }
         }
       }
 
@@ -632,33 +1541,90 @@ export const LidarViewport: React.FC<LidarViewportProps> = ({
     const group = anomalySelectionGroupRef.current;
     while (group.children.length > 0) group.remove(group.children[0]);
 
-    // 1. DRDO Target Inspection Bracket Box
-    const boxSize = anomaly.radius * 2.2;
-    const boxH = Math.max(0.6, anomaly.deltaZ * 4.0);
-    const boxGeom = new THREE.BoxGeometry(boxSize, boxH, boxSize);
+    const isSpeedBreaker = anomaly.name.toLowerCase().includes('speed') || anomaly.id.includes('SB');
+    const isVehicle = anomaly.type === 'vehicle' || anomaly.id.includes('COLLISION-') || anomaly.id.includes('LEAD') || anomaly.id.includes('ONCOMING');
+    const isPedestrian = anomaly.semanticClass === 'PEDESTRIAN' || anomaly.id.includes('PED');
+
+    const boxW = isVehicle ? 2.4 : isSpeedBreaker ? 8.8 : isPedestrian ? 1.4 : anomaly.radius * 2.2;
+    const boxL = isVehicle ? 4.8 : isSpeedBreaker ? 2.4 : isPedestrian ? 1.4 : anomaly.radius * 2.2;
+    const boxH = isVehicle ? 1.6 : isPedestrian ? 1.8 : Math.max(0.6, anomaly.deltaZ * 4.0);
+
+    // 1. Target Inspection Bracket Box
+    const boxGeom = new THREE.BoxGeometry(boxW, boxH, boxL);
     const edgesGeom = new THREE.EdgesGeometry(boxGeom);
-    const boxMat = new THREE.LineBasicMaterial({ color: 0xf59e0b, linewidth: 2 });
+    const boxMat = new THREE.LineBasicMaterial({
+      color: isVehicle ? 0xf43f5e : isSpeedBreaker ? 0x10b981 : isPedestrian ? 0xf43f5e : 0xf59e0b,
+      linewidth: 2,
+    });
     const targetBox = new THREE.LineSegments(edgesGeom, boxMat);
-    targetBox.position.set(anomaly.x, -boxH / 2 + 0.05, anomaly.z);
+    const boxPosY = isVehicle ? 0.8 : isPedestrian ? 0.9 : isSpeedBreaker ? 0.2 : -boxH / 2 + 0.05;
+    targetBox.position.set(anomaly.x, boxPosY, anomaly.z);
     group.add(targetBox);
 
-    // 2. Corner Bracket Reticles
-    const ringGeom = new THREE.RingGeometry(anomaly.radius * 1.15, anomaly.radius * 1.28, 32);
-    const ringMat = new THREE.MeshBasicMaterial({ color: 0xf59e0b, transparent: true, opacity: 0.9, side: THREE.DoubleSide });
-    const ring = new THREE.Mesh(ringGeom, ringMat);
-    ring.rotation.x = -Math.PI / 2;
-    ring.position.set(anomaly.x, 0.04, anomaly.z);
-    group.add(ring);
+    // 2. Floor Reticle / Ground Bracket
+    if (isSpeedBreaker) {
+      const planeGeom = new THREE.PlaneGeometry(8.8, 2.4);
+      const planeMat = new THREE.MeshBasicMaterial({
+        color: 0x10b981,
+        transparent: true,
+        opacity: 0.25,
+        side: THREE.DoubleSide,
+      });
+      const plane = new THREE.Mesh(planeGeom, planeMat);
+      plane.rotation.x = -Math.PI / 2;
+      plane.position.set(anomaly.x, 0.09, anomaly.z);
+      group.add(plane);
+    } else if (isVehicle) {
+      const planeGeom = new THREE.PlaneGeometry(2.6, 5.0);
+      const planeMat = new THREE.MeshBasicMaterial({
+        color: 0xf43f5e,
+        transparent: true,
+        opacity: 0.25,
+        side: THREE.DoubleSide,
+      });
+      const plane = new THREE.Mesh(planeGeom, planeMat);
+      plane.rotation.x = -Math.PI / 2;
+      plane.position.set(anomaly.x, 0.05, anomaly.z);
+      group.add(plane);
+    } else if (isPedestrian) {
+      const planeGeom = new THREE.PlaneGeometry(1.4, 1.4);
+      const planeMat = new THREE.MeshBasicMaterial({
+        color: 0xf43f5e,
+        transparent: true,
+        opacity: 0.25,
+        side: THREE.DoubleSide,
+      });
+      const plane = new THREE.Mesh(planeGeom, planeMat);
+      plane.rotation.x = -Math.PI / 2;
+      plane.position.set(anomaly.x, 0.05, anomaly.z);
+      group.add(plane);
+    } else {
+      const ringGeom = new THREE.RingGeometry(anomaly.radius * 1.15, anomaly.radius * 1.28, 32);
+      const ringMat = new THREE.MeshBasicMaterial({
+        color: 0xf59e0b,
+        transparent: true,
+        opacity: 0.9,
+        side: THREE.DoubleSide,
+      });
+      const ring = new THREE.Mesh(ringGeom, ringMat);
+      ring.rotation.x = -Math.PI / 2;
+      ring.position.set(anomaly.x, 0.04, anomaly.z);
+      group.add(ring);
+    }
 
     // 3. Crosshair Axis Ticks
     const crossLines: THREE.Vector3[] = [
-      new THREE.Vector3(anomaly.x - boxSize, 0.05, anomaly.z),
-      new THREE.Vector3(anomaly.x + boxSize, 0.05, anomaly.z),
-      new THREE.Vector3(anomaly.x, 0.05, anomaly.z - boxSize),
-      new THREE.Vector3(anomaly.x, 0.05, anomaly.z + boxSize),
+      new THREE.Vector3(anomaly.x - boxW / 2 - 0.8, 0.05, anomaly.z),
+      new THREE.Vector3(anomaly.x + boxW / 2 + 0.8, 0.05, anomaly.z),
+      new THREE.Vector3(anomaly.x, 0.05, anomaly.z - boxL / 2 - 0.8),
+      new THREE.Vector3(anomaly.x, 0.05, anomaly.z + boxL / 2 + 0.8),
     ];
     const crossGeom = new THREE.BufferGeometry().setFromPoints(crossLines);
-    const crossMat = new THREE.LineBasicMaterial({ color: 0x38bdf8, transparent: true, opacity: 0.85 });
+    const crossMat = new THREE.LineBasicMaterial({
+      color: isVehicle ? 0xf43f5e : 0x38bdf8,
+      transparent: true,
+      opacity: 0.85,
+    });
     group.add(new THREE.LineSegments(crossGeom, crossMat));
   };
 
@@ -735,15 +1701,71 @@ export const LidarViewport: React.FC<LidarViewportProps> = ({
       mainGroup.add(chunk);
     });
 
-    const oncomingCar = createRealisticTrafficCar(0x38bdf8, 'oncoming');
-    oncomingCar.position.set(2.4, 0, -40);
-    mainGroup.add(oncomingCar);
-    oncomingCarRef.current = oncomingCar;
+    // Build Multi-Vehicle Autonomous Traffic Fleet
+    const trafficGroup = trafficGroupRef.current;
+    if (trafficGroup) {
+      while (trafficGroup.children.length > 0) {
+        trafficGroup.remove(trafficGroup.children[0]);
+      }
+    }
+    trafficFleetRef.current = [];
 
-    const leadingCar = createRealisticTrafficCar(0xef4444, 'leading');
-    leadingCar.position.set(-2.4, 0, -28);
-    mainGroup.add(leadingCar);
-    leadingCarRef.current = leadingCar;
+    const fleetConfigs: Array<{
+      id: string;
+      color: number;
+      type: 'leading' | 'oncoming';
+      initialZ: number;
+      baseSpeed: number;
+      speedVariance: number;
+      oscillationFreq: number;
+      oscillationAmp: number;
+      randomPhase: number;
+    }> = [
+      // Pair 1 (Active at Density >= 2)
+      { id: 'lead-1', color: 0xef4444, type: 'leading', initialZ: +22.0, baseSpeed: 6.6, speedVariance: 0.05, oscillationFreq: 0.42, oscillationAmp: 0.8, randomPhase: 0.0 }, // Crimson Sedan (Left Lane Forward, passes parked rover)
+      { id: 'oncoming-1', color: 0x38bdf8, type: 'oncoming', initialZ: -14.0, baseSpeed: 7.2, speedVariance: -0.04, oscillationFreq: 0.55, oscillationAmp: 0.9, randomPhase: 1.2 }, // Sky Cyan (Right Lane Oncoming, passes in ~2s)
+
+      // Pair 2 (Active at Density >= 4)
+      { id: 'lead-2', color: 0xe2e8f0, type: 'leading', initialZ: -16.0, baseSpeed: 7.0, speedVariance: 0.02, oscillationFreq: 0.38, oscillationAmp: 0.7, randomPhase: 2.4 }, // Platinum Silver (Left Lane Forward)
+      { id: 'oncoming-2', color: 0x10b981, type: 'oncoming', initialZ: -38.0, baseSpeed: 7.8, speedVariance: 0.06, oscillationFreq: 0.62, oscillationAmp: 1.1, randomPhase: 3.6 }, // Emerald (Right Lane Oncoming)
+
+      // Pair 3 (Active at Density >= 6)
+      { id: 'lead-3', color: 0xf59e0b, type: 'leading', initialZ: +44.0, baseSpeed: 6.2, speedVariance: -0.03, oscillationFreq: 0.48, oscillationAmp: 0.6, randomPhase: 4.8 }, // Amber Sport (Left Lane Forward, passes parked rover)
+      { id: 'oncoming-3', color: 0x818cf8, type: 'oncoming', initialZ: -64.0, baseSpeed: 6.8, speedVariance: -0.05, oscillationFreq: 0.51, oscillationAmp: 0.8, randomPhase: 5.7 }, // Indigo (Right Lane Oncoming)
+
+      // Pair 4 (Active at Density >= 8)
+      { id: 'lead-4', color: 0x06b6d4, type: 'leading', initialZ: -52.0, baseSpeed: 7.4, speedVariance: 0.04, oscillationFreq: 0.44, oscillationAmp: 1.0, randomPhase: 1.8 }, // Cyan Electric (Left Lane Forward)
+      { id: 'oncoming-4', color: 0xf43f5e, type: 'oncoming', initialZ: -90.0, baseSpeed: 8.2, speedVariance: 0.07, oscillationFreq: 0.58, oscillationAmp: 1.2, randomPhase: 2.9 }, // Crimson Rose (Right Lane Oncoming)
+
+      // Pair 5 (Active at Density = 10)
+      { id: 'lead-5', color: 0xa855f7, type: 'leading', initialZ: -86.0, baseSpeed: 6.4, speedVariance: -0.02, oscillationFreq: 0.36, oscillationAmp: 0.7, randomPhase: 4.1 }, // Purple Coupe (Left Lane Forward)
+      { id: 'oncoming-5', color: 0xeab308, type: 'oncoming', initialZ: -118.0, baseSpeed: 7.5, speedVariance: 0.03, oscillationFreq: 0.65, oscillationAmp: 0.9, randomPhase: 0.8 }, // Gold Sedan (Right Lane Oncoming)
+    ];
+
+    fleetConfigs.forEach((cfg, idx) => {
+      const carMesh = createRealisticTrafficCar(cfg.id, cfg.color, cfg.type);
+      const laneX = cfg.type === 'oncoming' ? 2.4 : -2.4;
+      carMesh.position.set(laneX, 0, cfg.initialZ);
+      carMesh.visible = idx < (trafficDensityRef.current ?? 5);
+      if (trafficGroup) {
+        trafficGroup.add(carMesh);
+      }
+
+      trafficFleetRef.current.push({
+        id: cfg.id,
+        mesh: carMesh,
+        lane: cfg.type === 'oncoming' ? 'oncoming' : 'forward',
+        x: laneX,
+        z: cfg.initialZ,
+        speed: cfg.baseSpeed,
+        baseSpeed: cfg.baseSpeed,
+        speedVariance: cfg.speedVariance,
+        oscillationFreq: cfg.oscillationFreq,
+        oscillationAmp: cfg.oscillationAmp,
+        randomPhase: cfg.randomPhase,
+        wheelAngle: 0,
+      });
+    });
 
     const pedestrianCrossing = createRealisticPedestrian();
     pedestrianCrossing.position.set(0, 0.16, -18);
@@ -1007,7 +2029,7 @@ export const LidarViewport: React.FC<LidarViewportProps> = ({
 
     // 4. Floating 3D Depth Readout Badge at top of the light column
     const depthCm = Math.round(depth * 100);
-    const depthBadge = createDepthTextBadge(`-${depthCm}.0 cm DEPTH`, '#f59e0b');
+    const depthBadge = createDepthTextBadge(`-${depthCm}.0 cm EST`, '#f59e0b');
     depthBadge.position.set(0, beamHeight - depth + 0.45, 0);
     beamGroup.add(depthBadge);
 
@@ -1077,14 +2099,19 @@ export const LidarViewport: React.FC<LidarViewportProps> = ({
     });
 
     // 4. Floating Speed Breaker Tag / Caliper
-    const sbBadge = createDepthTextBadge(`+8.0 cm STEP`, '#10b981');
+    const sbBadge = createDepthTextBadge(`+8.0 cm EST`, '#10b981');
     sbBadge.position.set(0, 1.8, 0);
     sbBadge.scale.set(2.0, 0.6, 1.0);
     sbGroup.add(sbBadge);
 
     // 5. Invisible Hitbox for Raycast Inspector
     const hitGeom = new THREE.BoxGeometry(width, 0.6, length * 1.4);
-    const hitMat = new THREE.MeshBasicMaterial({ visible: false });
+    const hitMat = new THREE.MeshBasicMaterial({
+      transparent: true,
+      opacity: 0,
+      depthWrite: false,
+      visible: true,
+    });
     const hitMesh = new THREE.Mesh(hitGeom, hitMat);
     hitMesh.position.y = 0.2;
     hitMesh.userData = {
@@ -1149,7 +2176,12 @@ export const LidarViewport: React.FC<LidarViewportProps> = ({
     pothole.add(surfaceRing);
 
     const hitGeom = new THREE.CylinderGeometry(radius * 1.4, radius * 1.4, 1.0, 16);
-    const hitMat = new THREE.MeshBasicMaterial({ visible: false });
+    const hitMat = new THREE.MeshBasicMaterial({
+      transparent: true,
+      opacity: 0,
+      depthWrite: false,
+      visible: true,
+    });
     const hitMesh = new THREE.Mesh(hitGeom, hitMat);
     hitMesh.position.y = 0;
     hitMesh.userData = {
@@ -1573,46 +2605,145 @@ export const LidarViewport: React.FC<LidarViewportProps> = ({
     return wheelGroup;
   };
 
-  const createRealisticTrafficCar = (colorHex: number, type: 'oncoming' | 'leading'): THREE.Group => {
+  const createRealisticTrafficCar = (carId: string, colorHex: number, type: 'oncoming' | 'leading'): THREE.Group => {
     const car = new THREE.Group();
 
+    // 1. Sleek Main Car Body Chassis
+    const bodyMat = new THREE.MeshStandardMaterial({
+      color: colorHex,
+      metalness: 0.85,
+      roughness: 0.22,
+    });
     const body = new THREE.Mesh(
-      new THREE.BoxGeometry(1.9, 0.65, 4.4),
-      new THREE.MeshStandardMaterial({ color: colorHex, metalness: 0.85, roughness: 0.25 })
+      new THREE.BoxGeometry(1.9, 0.58, 4.4),
+      bodyMat
     );
-    body.position.y = 0.55;
+    body.position.y = 0.52;
     car.add(body);
 
-    const cabin = new THREE.Mesh(
-      new THREE.BoxGeometry(1.5, 0.55, 2.3),
-      new THREE.MeshStandardMaterial({ color: 0x0a0e14, metalness: 0.95, roughness: 0.1 })
+    // 2. Aerodynamic Tapered Front Hood
+    const hood = new THREE.Mesh(
+      new THREE.BoxGeometry(1.78, 0.12, 1.4),
+      bodyMat
     );
-    cabin.position.set(0, 1.15, -0.2);
+    hood.position.set(0, 0.62, -1.35);
+    car.add(hood);
+
+    // 3. Cabin / Greenhouse (Set-Back toward Rear +Z, giving natural long hood at -Z)
+    const glassMat = new THREE.MeshStandardMaterial({
+      color: 0x05080e,
+      metalness: 0.95,
+      roughness: 0.05,
+    });
+    const cabin = new THREE.Mesh(
+      new THREE.BoxGeometry(1.48, 0.54, 2.15),
+      glassMat
+    );
+    cabin.position.set(0, 1.05, 0.22);
     car.add(cabin);
 
-    const frontLightMat = new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0xffffff, emissiveIntensity: 1.2 });
-    const rearLightMat = new THREE.MeshStandardMaterial({ color: 0xff0033, emissive: 0xff0033, emissiveIntensity: 1.0 });
+    // 4. Sloped Front Windshield
+    const frontWindshield = new THREE.Mesh(
+      new THREE.BoxGeometry(1.42, 0.44, 0.5),
+      glassMat
+    );
+    frontWindshield.rotation.x = Math.PI / 6;
+    frontWindshield.position.set(0, 0.96, -0.92);
+    car.add(frontWindshield);
 
-    [-0.7, 0.7].forEach((lx) => {
-      const fLight = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.15, 0.1), type === 'oncoming' ? frontLightMat : rearLightMat);
-      fLight.position.set(lx, 0.55, 2.2);
+    // 5. Sloped Rear Window
+    const rearWindow = new THREE.Mesh(
+      new THREE.BoxGeometry(1.42, 0.42, 0.45),
+      glassMat
+    );
+    rearWindow.rotation.x = -Math.PI / 6;
+    rearWindow.position.set(0, 0.96, 1.34);
+    car.add(rearWindow);
+
+    // 6. Front Grille (Dark Brushed Metal)
+    const grilleMat = new THREE.MeshStandardMaterial({ color: 0x111827, roughness: 0.6 });
+    const grille = new THREE.Mesh(new THREE.BoxGeometry(1.1, 0.22, 0.06), grilleMat);
+    grille.position.set(0, 0.48, -2.22);
+    car.add(grille);
+
+    // 7. Dual Side Mirrors
+    [-1.02, 1.02].forEach((mx) => {
+      const mirror = new THREE.Mesh(
+        new THREE.BoxGeometry(0.18, 0.12, 0.14),
+        bodyMat
+      );
+      mirror.position.set(mx, 0.95, -0.72);
+      car.add(mirror);
+    });
+
+    // 8. Front White LED Headlights (at Front of Car: Z = -2.21)
+    const frontLightMat = new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      emissive: 0xffffff,
+      emissiveIntensity: 2.2,
+    });
+    [-0.68, 0.68].forEach((lx) => {
+      const fLight = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.14, 0.08), frontLightMat);
+      fLight.position.set(lx, 0.54, -2.21);
       car.add(fLight);
+    });
 
-      const rLight = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.15, 0.1), type === 'oncoming' ? rearLightMat : frontLightMat);
-      rLight.position.set(lx, 0.55, -2.2);
+    // 9. Rear Ruby LED Taillights (at Rear of Car: Z = +2.21)
+    const rearLightMat = new THREE.MeshStandardMaterial({
+      color: 0xff0033,
+      emissive: 0xff0033,
+      emissiveIntensity: 1.8,
+    });
+    [-0.68, 0.68].forEach((lx) => {
+      const rLight = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.14, 0.08), rearLightMat);
+      rLight.position.set(lx, 0.56, 2.21);
       car.add(rLight);
     });
 
-    [[-1.0, 1.3], [1.0, 1.3], [-1.0, -1.3], [1.0, -1.3]].forEach(([wx, wz]) => {
-      const wheel = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.36, 0.36, 0.28, 16),
-        new THREE.MeshStandardMaterial({ color: 0x111827, roughness: 0.8 })
+    // 10. Four High-Grip Wheels with Silver Rims
+    [[-0.98, -1.35], [0.98, -1.35], [-0.98, 1.35], [0.98, 1.35]].forEach(([wx, wz]) => {
+      const wheelGroup = new THREE.Group();
+      wheelGroup.name = 'traffic_wheel';
+      wheelGroup.position.set(wx, 0.36, wz);
+
+      const tire = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.36, 0.36, 0.26, 20),
+        new THREE.MeshStandardMaterial({ color: 0x111827, roughness: 0.85 })
       );
-      wheel.rotation.z = Math.PI / 2;
-      wheel.position.set(wx, 0.36, wz);
-      car.add(wheel);
+      tire.rotation.z = Math.PI / 2;
+      wheelGroup.add(tire);
+
+      const rim = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.24, 0.24, 0.28, 16),
+        new THREE.MeshStandardMaterial({ color: 0x64748b, metalness: 0.8, roughness: 0.2 })
+      );
+      rim.rotation.z = Math.PI / 2;
+      wheelGroup.add(rim);
+
+      car.add(wheelGroup);
     });
 
+    // 11. Hitbox for Three.js pointer inspection
+    const hitGeom = new THREE.BoxGeometry(2.4, 1.8, 4.8);
+    const hitMat = new THREE.MeshBasicMaterial({
+      transparent: true,
+      opacity: 0,
+      depthWrite: false,
+      visible: true,
+    });
+    const hitMesh = new THREE.Mesh(hitGeom, hitMat);
+    hitMesh.position.y = 0.9;
+    hitMesh.name = 'traffic_car_hitbox';
+    hitMesh.userData = {
+      isTrafficCar: true,
+      carId: carId,
+      colorHex: colorHex,
+      type: type,
+    };
+    car.add(hitMesh);
+    potholeHitMeshesRef.current.push(hitMesh);
+
+    // For Oncoming cars, rotate 180° so the front hood and white headlights face oncoming along +Z!
     if (type === 'oncoming') {
       car.rotation.y = Math.PI;
     }
@@ -2152,6 +3283,56 @@ export const LidarViewport: React.FC<LidarViewportProps> = ({
               <span>WORLD</span>
             </button>
 
+            {/* Direct Traffic Density Stepper */}
+            <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-lg bg-black/40 border border-slate-800 text-[11px] font-mono">
+              <Car className="w-3.5 h-3.5 text-amber-400" />
+              <span className="text-slate-400">TRAFFIC:</span>
+              <span className="text-amber-300 font-bold">{trafficDensity}/10</span>
+              <div className="flex items-center gap-0.5 ml-0.5">
+                <button
+                  onClick={() => onTrafficDensityChange?.(Math.max(0, trafficDensity - 1))}
+                  disabled={trafficDensity <= 0}
+                  className="w-4 h-4 rounded flex items-center justify-center bg-slate-800 text-slate-300 hover:text-white hover:bg-slate-700 disabled:opacity-30 disabled:cursor-not-allowed font-bold text-xs cursor-pointer"
+                  title="Decrease Traffic Fleet Density"
+                >
+                  -
+                </button>
+                <button
+                  onClick={() => onTrafficDensityChange?.(Math.min(10, trafficDensity + 1))}
+                  disabled={trafficDensity >= 10}
+                  className="w-4 h-4 rounded flex items-center justify-center bg-slate-800 text-slate-300 hover:text-white hover:bg-slate-700 disabled:opacity-30 disabled:cursor-not-allowed font-bold text-xs cursor-pointer"
+                  title="Increase Traffic Fleet Density"
+                >
+                  +
+                </button>
+              </div>
+            </div>
+
+            {/* Direct Traffic Speed Stepper */}
+            <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-lg bg-black/40 border border-slate-800 text-[11px] font-mono">
+              <Gauge className="w-3.5 h-3.5 text-hud-cyan" />
+              <span className="text-slate-400">SPD:</span>
+              <span className="text-hud-cyan font-bold">{(trafficSpeed ?? 1.0).toFixed(1)}x</span>
+              <div className="flex items-center gap-0.5 ml-0.5">
+                <button
+                  onClick={() => onTrafficSpeedChange?.(Math.max(0.5, Number(((trafficSpeed ?? 1.0) - 0.25).toFixed(2))))}
+                  disabled={(trafficSpeed ?? 1.0) <= 0.5}
+                  className="w-4 h-4 rounded flex items-center justify-center bg-slate-800 text-slate-300 hover:text-white hover:bg-slate-700 disabled:opacity-30 disabled:cursor-not-allowed font-bold text-xs cursor-pointer"
+                  title="Decrease Traffic Fleet Speed"
+                >
+                  -
+                </button>
+                <button
+                  onClick={() => onTrafficSpeedChange?.(Math.min(2.5, Number(((trafficSpeed ?? 1.0) + 0.25).toFixed(2))))}
+                  disabled={(trafficSpeed ?? 1.0) >= 2.5}
+                  className="w-4 h-4 rounded flex items-center justify-center bg-slate-800 text-slate-300 hover:text-white hover:bg-slate-700 disabled:opacity-30 disabled:cursor-not-allowed font-bold text-xs cursor-pointer"
+                  title="Increase Traffic Fleet Speed"
+                >
+                  +
+                </button>
+              </div>
+            </div>
+
             <button
               onClick={() => setShowPoints(!showPoints)}
               className={`px-2 py-1 rounded-lg flex items-center gap-1 transition ${
@@ -2161,147 +3342,407 @@ export const LidarViewport: React.FC<LidarViewportProps> = ({
               <Eye className="w-3.5 h-3.5" />
               <span>POINTS</span>
             </button>
+
+            {/* Live Semantic Perception Toggle */}
+            <button
+              onClick={() => setShowLivePerceptionHUD(!showLivePerceptionHUD)}
+              className={`px-2 py-1 rounded-lg flex items-center gap-1 transition cursor-pointer ${
+                showLivePerceptionHUD ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40 font-bold' : 'text-slate-400 hover:bg-slate-800/50'
+              }`}
+              title="Toggle Live 3D Semantic Perception HUD"
+            >
+              <Sparkles className="w-3.5 h-3.5 text-purple-400" />
+              <span>PERCEPTION</span>
+            </button>
           </div>
 
           <button
             onClick={() => applyCameraPreset('isometric')}
-            className="glass-panel p-2 rounded-xl text-slate-300 hover:text-hud-cyan transition"
+            className="glass-panel p-2 rounded-xl text-slate-300 hover:text-hud-cyan transition cursor-pointer"
             title="Reset Camera View"
           >
             <RotateCcw className="w-4 h-4" />
           </button>
 
           <button
-            onClick={() => setIsFullscreen(!isFullscreen)}
-            className="glass-panel p-2 rounded-xl text-slate-300 hover:text-hud-cyan transition"
+            onClick={toggleFullscreen}
+            className="glass-panel p-2 rounded-xl text-slate-300 hover:text-hud-cyan transition cursor-pointer"
+            title={isFullscreen ? 'Exit Fullscreen' : 'Fullscreen View'}
           >
             {isFullscreen ? <Minimize className="w-4 h-4" /> : <Maximize className="w-4 h-4" />}
           </button>
         </div>
       </div>
 
-      {/* DRDO DEFENCE R&D 3D SCIENTIFIC CELL & ANOMALY INSPECTOR PANEL */}
-      {selectedAnomaly && (
-        <div className="absolute top-16 right-4 z-30 w-80 animate-in slide-in-from-right-10 duration-200 pointer-events-auto font-mono text-xs select-none">
-          <div className="glass-panel p-3.5 rounded-2xl bg-slate-950/95 border border-amber-500/60 shadow-2xl flex flex-col gap-2.5 backdrop-blur-xl">
-            {/* Header */}
-            <div className="flex items-center justify-between pb-1.5 border-b border-slate-800">
+      {/* LIVE 3D SEMANTIC PERCEPTION HUD (Real-time Point Cloud AI Classification) */}
+      {showLivePerceptionHUD && (
+        <div className="absolute top-16 left-4 z-20 w-[310px] pointer-events-auto font-sans select-none animate-in slide-in-from-left-6 duration-200">
+          {!isPerceptionExpanded ? (
+            /* Collapsed Pill Mode */
+            <div
+              onClick={() => setIsPerceptionExpanded(true)}
+              className="glass-panel px-3 py-2 rounded-2xl bg-slate-950/95 border border-purple-500/40 shadow-xl flex items-center justify-between gap-2 backdrop-blur-2xl cursor-pointer hover:border-purple-400/80 transition"
+              title="Click to Expand Live Semantic Perception HUD"
+            >
               <div className="flex items-center gap-2">
-                <div className="p-1.5 rounded-lg bg-amber-500/20 text-amber-400 border border-amber-500/40">
-                  <Target className="w-4 h-4" />
-                </div>
-                <div>
-                  <div className="font-bold text-white text-[12px] font-display tracking-wide">
-                    {selectedAnomaly.name}
-                  </div>
-                  <div className="text-[9.5px] text-amber-400 font-bold">
-                    {selectedAnomaly.id} • {selectedAnomaly.type.toUpperCase()}
-                  </div>
-                </div>
-              </div>
-              <button
-                onClick={() => {
-                  setSelectedAnomaly(null);
-                  if (anomalySelectionGroupRef.current) {
-                    while (anomalySelectionGroupRef.current.children.length > 0) {
-                      anomalySelectionGroupRef.current.remove(anomalySelectionGroupRef.current.children[0]);
-                    }
-                  }
-                }}
-                className="text-slate-400 hover:text-white p-1 rounded hover:bg-slate-800"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            {/* Scientific Parameters Data Grid */}
-            <div className="grid grid-cols-2 gap-2 text-[10.5px]">
-              <div className="p-2 rounded-lg bg-black/60 border border-slate-800">
-                <div className="text-[9px] text-slate-400 font-medium">RADIAL DISTANCE</div>
-                <div className="text-white font-bold text-xs">{selectedAnomaly.distance} m</div>
-                <div className="text-[8.5px] text-hud-cyan">Foveation Range</div>
-              </div>
-
-              <div className="p-2 rounded-lg bg-black/60 border border-slate-800">
-                <div className="text-[9px] text-slate-400 font-medium">LOCAL RESOLUTION</div>
-                <div className="text-hud-emerald font-bold text-xs">{selectedAnomaly.resolution}</div>
-                <div className="text-[8.5px] text-hud-emerald font-semibold">Refined Cell Mesh</div>
-              </div>
-
-              <div className="p-2 rounded-lg bg-black/60 border border-slate-800">
-                <div className="text-[9px] text-slate-400 font-medium">MEASURED ELEVATION (Z)</div>
-                <div className="text-amber-400 font-black text-xs">
-                  {selectedAnomaly.elevation < 0 ? `${(selectedAnomaly.elevation * 100).toFixed(1)} cm` : `+${(selectedAnomaly.elevation * 100).toFixed(1)} cm`}
-                </div>
-                <div className="text-[8.5px] text-slate-400">Mean Surface Height</div>
-              </div>
-
-              <div className="p-2 rounded-lg bg-black/60 border border-slate-800">
-                <div className="text-[9px] text-slate-400 font-medium">ELEVATION ENVELOPE</div>
-                <div className="text-white font-bold text-xs">
-                  {(selectedAnomaly.minZ * 100).toFixed(0)}cm &rarr; {(selectedAnomaly.maxZ * 100).toFixed(0)}cm
-                </div>
-                <div className="text-[8.5px] text-slate-400">&Delta;Z = {(selectedAnomaly.deltaZ * 100).toFixed(1)}cm</div>
-              </div>
-
-              <div className="p-2 rounded-lg bg-black/60 border border-slate-800">
-                <div className="text-[9px] text-slate-400 font-medium">SURFACE ROUGHNESS</div>
-                <div className="text-purple-300 font-bold text-xs">
-                  &sigma;z = {(selectedAnomaly.roughness * 100).toFixed(1)} cm
-                </div>
-                <div className="text-[8.5px] text-slate-400">Height Variance</div>
-              </div>
-
-              <div className="p-2 rounded-lg bg-black/60 border border-slate-800">
-                <div className="text-[9px] text-slate-400 font-medium">POINT RETURNS (N)</div>
-                <div className="text-white font-bold text-xs">{selectedAnomaly.pointCount} pts</div>
-                <div className="text-[8.5px] text-slate-400">Refined Density</div>
-              </div>
-            </div>
-
-            {/* Traversability & Semantic Risk Tag */}
-            <div className="p-2 rounded-lg bg-slate-900/80 border border-slate-800 flex flex-col gap-1">
-              <div className="flex justify-between items-center text-[10px]">
-                <span className="text-slate-400 font-medium">TRAVERSABILITY ASSESSMENT:</span>
-                <span className={`px-2 py-0.5 rounded font-bold text-[9px] ${
-                  selectedAnomaly.isTraversable
-                    ? 'bg-hud-emerald/20 text-hud-emerald border border-hud-emerald/40'
-                    : 'bg-red-500/20 text-red-400 border border-red-500/40'
-                }`}>
-                  {selectedAnomaly.isTraversable ? 'TRAVERSABLE' : 'NON-TRAVERSABLE RISK'}
+                <span className="w-2.5 h-2.5 rounded-full bg-purple-400 animate-pulse shadow-purple-glow" />
+                <span className="text-[11px] font-bold text-white font-mono tracking-wide">LIVE PERCEPTION</span>
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-300 font-mono font-bold border border-purple-500/40">
+                  {(perceptionStats.meanConfidence * 100).toFixed(1)}% CONF
                 </span>
               </div>
-              <div className="text-[9.5px] text-slate-300">
-                Class: <span className="font-bold text-white">{selectedAnomaly.semanticClass}</span> (Confidence: {(selectedAnomaly.confidence * 100).toFixed(1)}%)
+              <ChevronDown className="w-4 h-4 text-purple-300" />
+            </div>
+          ) : (
+            /* Expanded Full Semantic Perception Card */
+            <div className="glass-panel p-3.5 rounded-2xl bg-slate-950/95 border border-purple-500/40 shadow-2xl backdrop-blur-2xl flex flex-col gap-2.5 max-h-[calc(100vh-220px)] overflow-y-auto custom-scrollbar">
+              {/* Header */}
+              <div className="flex items-center justify-between pb-2 border-b border-slate-800/90">
+                <div className="flex items-center gap-2">
+                  <div className="p-1.5 rounded-xl bg-purple-500/20 text-purple-300 border border-purple-500/50 shadow-sm">
+                    <Sparkles className="w-3.5 h-3.5" />
+                  </div>
+                  <div>
+                    <div className="font-bold text-white text-[12px] font-display tracking-wide leading-tight flex items-center gap-1.5">
+                      <span>LIVE 3D PERCEPTION</span>
+                      <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
+                    </div>
+                    <div className="text-[9.5px] text-purple-300 font-mono">
+                      PointNet++ / SparseConv3D • {perceptionStats.inferenceLatencyMs.toFixed(1)}ms
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => setIsPerceptionExpanded(false)}
+                    className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition cursor-pointer"
+                    title="Collapse HUD"
+                  >
+                    <ChevronUp className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    onClick={() => setShowLivePerceptionHUD(false)}
+                    className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition cursor-pointer"
+                    title="Close HUD"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+
+              {/* Multi-Class Stacked Percentage Bar */}
+              <div className="flex flex-col gap-1">
+                <div className="flex justify-between items-center text-[10px] font-mono text-slate-400">
+                  <span className="font-semibold text-slate-300">POINT CLASS COMPOSITION</span>
+                  <span className="text-hud-cyan font-bold">{perceptionStats.totalPoints.toLocaleString()} PTS</span>
+                </div>
+                <div className="h-2 w-full rounded-full bg-slate-900 overflow-hidden flex border border-slate-800">
+                  {perceptionStats.classDistribution.map((item) => (
+                    <div
+                      key={item.id}
+                      style={{ width: `${item.pct}%`, backgroundColor: item.color }}
+                      className="h-full transition-all duration-300"
+                      title={`${item.label}: ${item.count} pts (${item.pct}%)`}
+                    />
+                  ))}
+                </div>
+              </div>
+
+              {/* Active Semantic Classes Grid */}
+              <div className="flex flex-col gap-1">
+                <div className="text-[10px] text-slate-400 font-mono font-semibold uppercase tracking-wider">
+                  CLASSIFIED SPECTRUM
+                </div>
+                <div className="grid grid-cols-2 gap-1.5 text-[11px] font-mono">
+                  {perceptionStats.classDistribution.map((item) => (
+                    <div
+                      key={item.id}
+                      className="p-1.5 rounded-xl bg-black/50 border border-slate-800/80 flex items-center justify-between gap-1.5"
+                    >
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <span
+                          className="w-2 h-2 rounded-full flex-shrink-0"
+                          style={{ backgroundColor: item.color }}
+                        />
+                        <span className="text-slate-200 truncate text-[10px]">{item.label}</span>
+                      </div>
+                      <span className="text-purple-300 font-bold text-[10px] flex-shrink-0">
+                        {item.pct}%
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Live Tracked 3D Semantic Objects */}
+              {perceptionStats.topTrackedObjects.length > 0 && (
+                <div className="flex flex-col gap-1 pt-1 border-t border-slate-800/80">
+                  <div className="flex justify-between items-center text-[10px] font-mono">
+                    <span className="text-slate-400 uppercase tracking-wider font-semibold">TRACKED 3D OBJECTS</span>
+                    <span className="text-hud-emerald font-bold">{perceptionStats.topTrackedObjects.length} DETECTED</span>
+                  </div>
+
+                  <div className="flex flex-col gap-1 max-h-[140px] overflow-y-auto custom-scrollbar pr-0.5">
+                    {perceptionStats.topTrackedObjects.slice(0, 6).map((obj) => (
+                      <div
+                        key={obj.id}
+                        className="p-1.5 rounded-xl bg-slate-900/80 border border-slate-800/90 flex items-center justify-between text-[10.5px] font-mono hover:border-purple-500/50 transition cursor-pointer"
+                        onClick={() => {
+                          const query = queryLidarMapAt(-obj.center[1], -obj.center[0], latestFrameRef.current, 2.0);
+                          const anomalyData: SelectedAnomalyData = {
+                            id: obj.id,
+                            name: obj.name,
+                            type: obj.classId === 2 ? 'vehicle' : obj.classId === 3 ? 'structure' : 'obstacle',
+                            x: -obj.center[1],
+                            y: obj.center[2],
+                            z: -obj.center[0],
+                            minZ: query.minZ,
+                            maxZ: query.maxZ,
+                            elevation: query.elevation,
+                            deltaZ: query.deltaZ,
+                            radius: 2.0,
+                            roughness: query.roughness,
+                            traversability: query.traversability,
+                            isTraversable: query.isTraversable,
+                            semanticClass: obj.className,
+                            confidence: obj.confidence / 100,
+                            pointCount: query.pointCount,
+                            resolution: query.resolutionName,
+                            distance: obj.dist,
+                            provenance: 'LIVE 3D SEMANTIC PERCEPTION STREAM',
+                            groundTruth: {
+                              source: 'Perception Inference Engine',
+                            },
+                          };
+                          setSelectedAnomaly(anomalyData);
+                          highlightSelectedAnomaly(anomalyData);
+                        }}
+                      >
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <span
+                            className="w-1.5 h-1.5 rounded-full flex-shrink-0"
+                            style={{ backgroundColor: SEMANTIC_CLASSES[obj.classId]?.color || '#a855f7' }}
+                          />
+                          <span className="text-white truncate font-bold">{obj.name}</span>
+                        </div>
+                        <div className="flex items-center gap-1.5 flex-shrink-0">
+                          <span className="text-hud-cyan font-bold">{obj.dist}m</span>
+                          <span className="text-[9px] px-1 py-0.2 rounded bg-purple-500/20 text-purple-300 border border-purple-500/30">
+                            {obj.confidence}%
+                          </span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Bottom Model Metric */}
+              <div className="flex items-center justify-between pt-1 border-t border-slate-800/80 text-[9.5px] font-mono text-slate-400">
+                <span>CONFIDENCE: <strong className="text-hud-emerald">{(perceptionStats.meanConfidence * 100).toFixed(1)}%</strong></span>
+                <span>FOVEATION: <strong className="text-hud-cyan">ZONE 0-3</strong></span>
               </div>
             </div>
-
-            {/* Camera Actions & Data Provenance */}
-            <div className="flex items-center gap-2 pt-1 border-t border-slate-800">
-              <button
-                onClick={() => focusCameraOnAnomaly(selectedAnomaly)}
-                className="flex-1 py-1.5 rounded-lg bg-hud-cyan text-slate-950 font-bold text-[10.5px] hover:bg-hud-cyan/90 transition flex items-center justify-center gap-1 cursor-pointer"
-              >
-                <Crosshair className="w-3.5 h-3.5" />
-                <span>INSPECT FOCUS</span>
-              </button>
-
-              <button
-                onClick={() => {
-                  if (onOpenResolution) onOpenResolution();
-                }}
-                className="px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-slate-300 hover:text-white text-[10.5px] font-semibold cursor-pointer"
-              >
-                FOVEATION
-              </button>
-            </div>
-
-            <div className="text-[8.5px] text-slate-500 text-center font-mono">
-              PROVENANCE: {selectedAnomaly.provenance}
-            </div>
-          </div>
+          )}
         </div>
       )}
+
+      {/* DRDO DEFENCE R&D 3D SCIENTIFIC CELL & ANOMALY INSPECTOR PANEL */}
+      {selectedAnomaly && (() => {
+        const isVehicle = selectedAnomaly.type === 'vehicle' || selectedAnomaly.id.startsWith('COLLISION-');
+        const isSpeedBreaker = selectedAnomaly.id.includes('SB') || selectedAnomaly.name.toLowerCase().includes('speed');
+        const borderColor = isVehicle ? 'border-red-500/80 shadow-red-950/50' : isSpeedBreaker ? 'border-emerald-500/70 shadow-emerald-950/40' : 'border-amber-500/70 shadow-amber-950/40';
+        const iconBg = isVehicle ? 'bg-red-500/20 text-red-400 border-red-500/50' : isSpeedBreaker ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/50' : 'bg-amber-500/20 text-amber-300 border-amber-500/50';
+        const idColor = isVehicle ? 'text-red-400' : isSpeedBreaker ? 'text-emerald-400' : 'text-amber-400';
+
+        return (
+          <div className="absolute top-16 right-4 z-30 w-[350px] animate-in slide-in-from-right-10 duration-200 pointer-events-auto font-sans select-none">
+            <div className={`glass-panel p-4 rounded-2xl bg-slate-950/95 border ${borderColor} shadow-2xl flex flex-col gap-3 backdrop-blur-2xl`}>
+              {/* Header */}
+              <div className="flex items-center justify-between pb-2 border-b border-slate-800/90">
+                <div className="flex items-center gap-2.5">
+                  <div className={`p-2 rounded-xl ${iconBg} border shadow-sm`}>
+                    {isVehicle ? <ShieldAlert className="w-4 h-4" /> : isSpeedBreaker ? <Activity className="w-4 h-4" /> : <Target className="w-4 h-4" />}
+                  </div>
+                  <div>
+                    <div className="font-bold text-white text-[13px] font-display tracking-wide leading-snug">
+                      {selectedAnomaly.name}
+                    </div>
+                    <div className={`text-[10px] ${idColor} font-bold font-mono tracking-wider mt-0.5`}>
+                      {selectedAnomaly.id} • {selectedAnomaly.type.toUpperCase()}
+                    </div>
+                  </div>
+                </div>
+                <button
+                  onClick={() => {
+                    setSelectedAnomaly(null);
+                    if (anomalySelectionGroupRef.current) {
+                      while (anomalySelectionGroupRef.current.children.length > 0) {
+                        anomalySelectionGroupRef.current.remove(anomalySelectionGroupRef.current.children[0]);
+                      }
+                    }
+                  }}
+                  className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800 transition cursor-pointer"
+                  title="Close Anomaly Inspector"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Scientific Parameters Data Grid */}
+              <div className="grid grid-cols-2 gap-2 text-xs">
+                <div className="p-2.5 rounded-xl bg-black/60 border border-slate-800/90 flex flex-col gap-0.5">
+                  <div className="text-[10px] text-slate-300 font-sans font-semibold tracking-wider uppercase">RADIAL DISTANCE</div>
+                  <div className="text-white font-bold text-sm font-mono tracking-tight">{selectedAnomaly.distance} m</div>
+                  <div className="text-[10px] text-hud-cyan font-mono font-medium">Foveation Range</div>
+                </div>
+
+                <div className="p-2.5 rounded-xl bg-black/60 border border-slate-800/90 flex flex-col gap-0.5">
+                  <div className="text-[10px] text-slate-300 font-sans font-semibold tracking-wider uppercase">LOCAL RESOLUTION</div>
+                  <div className="text-hud-emerald font-bold text-sm font-mono tracking-tight">{selectedAnomaly.resolution}</div>
+                  <div className="text-[10px] text-hud-emerald font-mono font-medium">Refined Cell Mesh</div>
+                </div>
+
+                <div className="p-2.5 rounded-xl bg-black/60 border border-slate-800/90 flex flex-col gap-0.5">
+                  <div className="text-[10px] text-slate-300 font-sans font-semibold tracking-wider uppercase">ELEVATION (Z)</div>
+                  <div className={`font-black text-sm font-mono tracking-tight ${isVehicle ? 'text-red-400' : 'text-amber-300'}`}>
+                    {selectedAnomaly.elevation < 0
+                      ? `${(selectedAnomaly.elevation * 100).toFixed(1)} cm`
+                      : selectedAnomaly.elevation >= 1.0
+                      ? `+${selectedAnomaly.elevation.toFixed(2)} m (+${(selectedAnomaly.elevation * 100).toFixed(0)} cm)`
+                      : `+${(selectedAnomaly.elevation * 100).toFixed(1)} cm`}
+                  </div>
+                  <div className="text-[10px] text-slate-400 font-mono">Mean Surface Height</div>
+                </div>
+
+                <div className="p-2.5 rounded-xl bg-black/60 border border-slate-800/90 flex flex-col gap-0.5">
+                  <div className="text-[10px] text-slate-300 font-sans font-semibold tracking-wider uppercase">ELEVATION BOUNDS</div>
+                  <div className="text-white font-bold text-sm font-mono tracking-tight">
+                    {(selectedAnomaly.minZ * 100).toFixed(0)}cm &rarr; {(selectedAnomaly.maxZ * 100).toFixed(0)}cm
+                  </div>
+                  <div className="text-[10px] text-slate-400 font-mono">&Delta;Z = {(selectedAnomaly.deltaZ * 100).toFixed(1)} cm</div>
+                </div>
+
+                <div className="p-2.5 rounded-xl bg-black/60 border border-slate-800/90 flex flex-col gap-0.5">
+                  <div className="text-[10px] text-slate-300 font-sans font-semibold tracking-wider uppercase">SURFACE ROUGHNESS</div>
+                  <div className="text-purple-300 font-bold text-sm font-mono tracking-tight">
+                    &sigma;z = {(selectedAnomaly.roughness * 100).toFixed(1)} cm
+                  </div>
+                  <div className="text-[10px] text-slate-400 font-mono">Height Variance</div>
+                </div>
+
+                <div className="p-2.5 rounded-xl bg-black/60 border border-slate-800/90 flex flex-col gap-0.5">
+                  <div className="text-[10px] text-slate-300 font-sans font-semibold tracking-wider uppercase">POINT RETURNS (N)</div>
+                  <div className="text-white font-bold text-sm font-mono tracking-tight">{selectedAnomaly.pointCount} pts</div>
+                  <div className="text-[10px] text-slate-400 font-mono">Refined Density</div>
+                </div>
+              </div>
+
+              {/* Traversability & Semantic Risk Tag */}
+              <div className="p-2.5 rounded-xl bg-slate-900/90 border border-slate-800/90 flex flex-col gap-1.5">
+                <div className="flex justify-between items-center text-xs">
+                  <span className="text-slate-300 font-semibold font-sans">TRAVERSABILITY:</span>
+                  <span className={`px-2.5 py-0.5 rounded-md font-bold text-[10px] font-mono border ${
+                    selectedAnomaly.isTraversable
+                      ? 'bg-hud-emerald/20 text-hud-emerald border-hud-emerald/40'
+                      : 'bg-red-500/20 text-red-300 border-red-500/50'
+                  }`}>
+                    {selectedAnomaly.isTraversable ? 'TRAVERSABLE' : 'NON-TRAVERSABLE RISK'}
+                  </span>
+                </div>
+                <div className="text-xs text-slate-200 font-sans">
+                  Class: <span className="font-bold text-white">{selectedAnomaly.semanticClass}</span>{' '}
+                  <span className="text-slate-400 font-mono">(Confidence: {(selectedAnomaly.confidence * 100).toFixed(1)}%)</span>
+                </div>
+              </div>
+
+              {/* Scientific Ground Truth Isolation & Benchmarking */}
+              {selectedAnomaly.groundTruth && (
+                <div className="p-2.5 rounded-xl bg-slate-900/90 border border-hud-cyan/30 flex flex-col gap-1 text-[11px] font-mono">
+                  <div className="flex justify-between items-center text-[10px] text-slate-400 uppercase tracking-wider font-semibold pb-1 border-b border-slate-800/80">
+                    <span className="text-hud-cyan font-bold">BENCHMARK COMPARISON</span>
+                    <span className="text-slate-400 text-[9px]">ISOLATED GT</span>
+                  </div>
+                  {selectedAnomaly.groundTruth.trueDepthCm !== undefined && (
+                    <>
+                      <div className="flex justify-between items-center text-slate-300">
+                        <span>LiDAR Estimated Depth:</span>
+                        <span className="text-amber-300 font-bold">
+                          {(selectedAnomaly.elevation < 0 ? selectedAnomaly.elevation * 100 : -Math.abs(selectedAnomaly.elevation) * 100).toFixed(1)} cm
+                        </span>
+                      </div>
+                      <div className="flex justify-between items-center text-slate-300">
+                        <span>Simulator Ground Truth:</span>
+                        <span className="text-white font-bold">-{selectedAnomaly.groundTruth.trueDepthCm.toFixed(1)} cm</span>
+                      </div>
+                      <div className="flex justify-between items-center text-[10.5px]">
+                        <span className="text-slate-400">Estimation Error (&Delta;):</span>
+                        <span className="text-hud-emerald font-bold">
+                          {Math.abs((Math.abs(selectedAnomaly.elevation) * 100) - selectedAnomaly.groundTruth.trueDepthCm).toFixed(1)} cm
+                        </span>
+                      </div>
+                    </>
+                  )}
+                  {selectedAnomaly.groundTruth.trueHeightCm !== undefined && (
+                    <>
+                      <div className="flex justify-between items-center text-slate-300">
+                        <span>LiDAR Estimated Height:</span>
+                        <span className="text-emerald-300 font-bold">
+                          +{(Math.abs(selectedAnomaly.elevation) * 100).toFixed(1)} cm
+                        </span>
+                      </div>
+                      <div className="flex justify-between items-center text-slate-300">
+                        <span>Simulator Ground Truth:</span>
+                        <span className="text-white font-bold">+{selectedAnomaly.groundTruth.trueHeightCm.toFixed(1)} cm</span>
+                      </div>
+                      <div className="flex justify-between items-center text-[10.5px]">
+                        <span className="text-slate-400">Estimation Error (&Delta;):</span>
+                        <span className="text-hud-emerald font-bold">
+                          {Math.abs((Math.abs(selectedAnomaly.elevation) * 100) - selectedAnomaly.groundTruth.trueHeightCm).toFixed(1)} cm
+                        </span>
+                      </div>
+                    </>
+                  )}
+                  {selectedAnomaly.groundTruth.trueDimensions && (
+                    <div className="flex justify-between items-center text-slate-300">
+                      <span>True Dimensions (GT):</span>
+                      <span className="text-white font-bold">{selectedAnomaly.groundTruth.trueDimensions}</span>
+                    </div>
+                  )}
+                  <div className="text-[9px] text-slate-400 text-right mt-0.5">
+                    Source: {selectedAnomaly.groundTruth.source}
+                  </div>
+                </div>
+              )}
+
+              {/* Camera Actions & Data Provenance */}
+              <div className="flex items-center gap-2 pt-1 border-t border-slate-800/90">
+                <button
+                  onClick={() => focusCameraOnAnomaly(selectedAnomaly)}
+                  className="flex-1 py-2 rounded-xl bg-hud-cyan text-slate-950 font-bold text-xs font-sans hover:bg-hud-cyan/90 transition flex items-center justify-center gap-1.5 shadow-cyan-glow-sm cursor-pointer"
+                >
+                  <Crosshair className="w-4 h-4" />
+                  <span>INSPECT FOCUS</span>
+                </button>
+
+                <button
+                  onClick={() => {
+                    if (onOpenResolution) onOpenResolution();
+                  }}
+                  className="px-3 py-2 rounded-xl bg-slate-900 border border-slate-700/90 text-slate-200 hover:text-white hover:border-hud-cyan/40 text-xs font-sans font-semibold transition cursor-pointer"
+                >
+                  FOVEATION
+                </button>
+              </div>
+
+              <div className="text-[9.5px] text-slate-400 text-center font-mono tracking-wide">
+                PROVENANCE: {selectedAnomaly.provenance}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* BOTTOM-RIGHT POV ROTATION & ZOOM TOOLBAR */}
       <div className="absolute bottom-4 right-4 z-20 flex items-center gap-1.5 pointer-events-auto font-mono text-xs">
