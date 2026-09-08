@@ -227,3 +227,50 @@ class SyntheticSceneConfig:
     pothole_depth: float = 0.08  # 8 cm depression
     slope_deg: float = 10.0  # 10 degrees incline
     seed: int = 42
+
+
+@dataclass
+class NavigationImportance:
+    """Quantitative navigation importance scoring for adaptive foveation."""
+
+    total_score: float  # Composite importance score in [0.0, 1.0]
+    distance_score: float  # Distance proximity / corridor score [0.0, 1.0]
+    semantic_score: float  # Semantic vulnerability / class weight [0.0, 1.0]
+    hazard_score: float  # Geometric hazard severity score [0.0, 1.0]
+    risk_score: float  # Traversability risk score [0.0, 1.0]
+    requires_local_refinement: bool  # True if score >= threshold to trigger local refinement
+
+
+@dataclass
+class LocalRefinementPatch:
+    """Definition of a localized, high-resolution spatial patch within a coarser foveation ring."""
+
+    center_x: float  # Patch center X coordinate in meters
+    center_y: float  # Patch center Y coordinate in meters
+    radius: float  # Patch influence radius in meters (e.g. 2.5m)
+    target_resolution: float  # Target refined cell size (e.g. 0.05m or 0.10m)
+    source_ring_name: str  # Original coarse ring name (e.g. "mid", "far")
+    target_ring_name: str  # Refined ring name (e.g. "mid_near", "near")
+
+
+@dataclass
+class AvoidanceDecision:
+    """Deterministic sensor-derived collision avoidance and vehicle control decision."""
+
+    state: str  # "SAFE", "CAUTION", "HIGH_RISK", "EMERGENCY_STOP"
+    obstacle_distance: float  # Distance to critical obstacle in forward corridor (meters)
+    obstacle_lateral_pos: float  # Lateral Y coordinate of obstacle (meters, positive=left)
+    obstacle_class: int  # Semantic class ID of critical obstacle (0..7)
+    risk_level: str  # "LOW", "MEDIUM", "HIGH", "CRITICAL"
+    recommended_action: str  # Explainable action (e.g. "MAINTAIN_CRUISE", "REDUCE_SPEED", "AVOID_LEFT")
+    avoidance_direction: str  # "CENTER", "LEFT", "RIGHT", "STOP"
+    target_speed_kmh: float  # Recommended target speed in km/h
+    target_steer_deg: float  # Recommended steering angle in degrees
+    left_clearance: float  # Traversable free-space clearance in left corridor (meters)
+    right_clearance: float  # Traversable free-space clearance in right corridor (meters)
+    forward_clearance: float  # Traversable free-space clearance in central corridor (meters)
+    is_emergency_stop: bool  # Immediate emergency braking flag
+    local_refinement_active: bool  # True if navigation importance refined this region
+    refined_patch: Optional[LocalRefinementPatch] = None
+    timestamp: float = 0.0
+

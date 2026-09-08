@@ -14,6 +14,11 @@ export class SimulationEngine {
   private steerAngle = 0; // deg
   private targetSpeed = 8.0;
 
+  // Collision Avoidance & State Machine Persistence (Zero Ground Truth Leakage)
+  private lastAvoidanceDirection: 'CENTER' | 'LEFT' | 'RIGHT' | 'STOP' = 'CENTER';
+  private avoidanceLockFrames = 0;
+  private lastAvoidanceState: 'SAFE' | 'CAUTION' | 'HIGH_RISK' | 'EMERGENCY_STOP' = 'SAFE';
+
   constructor(initialScenario: ScenarioType = 'urban') {
     this.scenario = initialScenario;
   }
@@ -22,6 +27,9 @@ export class SimulationEngine {
     this.scenario = sc;
     this.frameCount = 0;
     this.distanceTraveled = 0;
+    this.lastAvoidanceDirection = 'CENTER';
+    this.avoidanceLockFrames = 0;
+    this.lastAvoidanceState = 'SAFE';
   }
 
   public updateTeleop(teleop: Partial<TeleopState>) {
@@ -56,17 +64,21 @@ export class SimulationEngine {
     // Generate Infinite Procedural Urban Environment, Traffic & Dynamic Actors (Simulated Physical World)
     this.populateInfiniteWorld(t, currentDist, points, classes, intensity, boundingBoxes, teleop);
 
-    // Compute Foveated Multi-Ring 2.5D Elevation & Semantic Grid (Simulated Perception & Grid Mapping)
+    // Compute Foveated Multi-Ring 2.5D Elevation & Semantic Grid with Navigation-Aware Sparse Local Refinement
     this.aggregateFoveatedGrid(points, classes, cells);
 
     // Detect Hazards strictly from the 2.5D Elevation Grid Cells (Observation Pipeline)
     this.detectHazardsFromFoveatedGrid(cells, hazards);
+
+    // Evaluate Deterministic Sensor-Grounded Collision Avoidance State Machine
+    const avoidanceState = this.evaluateAvoidanceState(cells, this.egoSpeed);
 
     // Hazard metrics
     const curbCount = hazards.filter((h) => h.type === 'curb').length;
     const potholeCount = hazards.filter((h) => h.type === 'pothole').length;
     const overhangCount = hazards.filter((h) => h.type === 'overhang').length;
     const obstacleCount = boundingBoxes.length;
+    const refinedCellCount = Object.values(cells).filter((c) => c.is_refined).length;
 
     // Profiling
     const prepLatency = 2.8 + Math.sin(t * 1.5) * 0.4;
@@ -117,9 +129,13 @@ export class SimulationEngine {
           overhang_count: overhangCount,
           obstacle_count: obstacleCount,
         },
+        avoidance: avoidanceState,
+        local_refinement_active: avoidanceState.localRefinementActive,
+        refined_cell_count: refinedCellCount,
       },
     };
   }
+
 
   private populateInfiniteWorld(
     t: number,
@@ -566,6 +582,46 @@ export class SimulationEngine {
     classes: number[],
     cells: Record<string, GridCellData>
   ) {
+    // 1. First Pass: Detect navigation-critical clusters in the tactical corridor (10m <= X <= 50m, |Y| <= 3.5m)
+    // To trigger sparse local refinement around safety-critical objects (e.g. vehicles, pedestrians, obstacles)
+    const criticalPatches: Array<{ cx: number; cy: number; radius: number }> = [];
+    const minObsPoints = 6;
+    const clusterCandidates: Array<{ sumX: number; sumY: number; count: number; maxSem: number }> = [];
+
+    for (let i = 0; i < points.length; i++) {
+      const [x, y, z] = points[i];
+      const cls = classes[i] ?? 0;
+      const dist = Math.hypot(x, y);
+
+      // Only evaluate potential refinement in mid/far zones (10m <= dist <= 50m) within tactical corridor
+      if (dist >= 10.0 && dist <= 50.0 && x > 0 && Math.abs(y) <= 3.6 && (cls > 0 || z > 0.35)) {
+        let merged = false;
+        for (const cl of clusterCandidates) {
+          if (Math.hypot(x - cl.sumX / cl.count, y - cl.sumY / cl.count) < 2.0) {
+            cl.sumX += x;
+            cl.sumY += y;
+            cl.count++;
+            if (cls > cl.maxSem) cl.maxSem = cls;
+            merged = true;
+            break;
+          }
+        }
+        if (!merged) {
+          clusterCandidates.push({ sumX: x, sumY: y, count: 1, maxSem: cls });
+        }
+      }
+    }
+
+    for (const cl of clusterCandidates) {
+      if (cl.count >= minObsPoints && cl.maxSem > 0) {
+        criticalPatches.push({
+          cx: cl.sumX / cl.count,
+          cy: cl.sumY / cl.count,
+          radius: 2.5,
+        });
+      }
+    }
+
     const minZByCell: Record<string, number> = {};
     const maxZByCell: Record<string, number> = {};
     const sumZByCell: Record<string, number> = {};
@@ -573,7 +629,7 @@ export class SimulationEngine {
     const classCountsByCell: Record<string, Record<number, number>> = {};
     const cellMeta: Record<
       string,
-      { resName: string; resMeters: number; ringId: number; cx: number; cy: number }
+      { resName: string; resMeters: number; ringId: number; cx: number; cy: number; isRefined: boolean }
     > = {};
 
     for (let i = 0; i < points.length; i++) {
@@ -581,9 +637,11 @@ export class SimulationEngine {
       const cls = classes[i] ?? 0;
       const dist = Math.hypot(x, y);
 
+      // Base distance-based foveation hierarchy
       let ringId = 3;
       let resName = 'far';
       let resMeters = 0.50;
+      let isRefined = false;
 
       if (dist < 10) {
         ringId = 0; resName = 'near'; resMeters = 0.05;
@@ -591,6 +649,20 @@ export class SimulationEngine {
         ringId = 1; resName = 'mid_near'; resMeters = 0.10;
       } else if (dist < 50) {
         ringId = 2; resName = 'mid'; resMeters = 0.20;
+      }
+
+      // Check if point falls within any local refinement patch
+      if (dist >= 10.0 && dist <= 50.0) {
+        for (const patch of criticalPatches) {
+          if (Math.hypot(x - patch.cx, y - patch.cy) <= patch.radius) {
+            // Refine local region to finer resolution (10cm)
+            ringId = 1;
+            resName = 'mid_near';
+            resMeters = 0.10;
+            isRefined = true;
+            break;
+          }
+        }
       }
 
       const cellXIdx = Math.floor(x / resMeters);
@@ -607,6 +679,7 @@ export class SimulationEngine {
           resName,
           resMeters,
           ringId,
+          isRefined,
           cx: (cellXIdx + 0.5) * resMeters,
           cy: (cellYIdx + 0.5) * resMeters,
         };
@@ -638,6 +711,16 @@ export class SimulationEngine {
       const occ = dominantClass === 0 ? 0.05 : Math.min(1.0, 0.4 + (cnt / 25) * 0.6);
       const roughness = Math.max(0.01, (maxZ - minZ) * 0.1);
 
+      // Modular Navigation Importance Score: I = w_dist*s_dist + w_sem*s_sem + w_haz*s_haz + w_risk*s_risk
+      const r = Math.hypot(meta.cx, meta.cy);
+      const inCorridor = meta.cx > 0 && Math.abs(meta.cy) <= 1.8;
+      const sDist = inCorridor ? Math.max(0, 1.0 - r / 50.0) : 0.25 * Math.max(0, 1.0 - r / 100.0);
+      const semWeights: Record<number, number> = { 0: 0.1, 1: 0.4, 2: 0.9, 3: 1.0, 4: 1.0, 5: 0.6, 6: 0.8, 7: 0.75 };
+      const sSem = semWeights[dominantClass] ?? 0.5;
+      const sHaz = (elev <= -0.05 || roughness > 0.12) ? 1.0 : 0.0;
+      const sRisk = dominantClass !== 0 ? 1.0 : 0.0;
+      const navImportance = Number(Math.min(1.0, 0.25 * sDist + 0.35 * sSem + 0.25 * sHaz + 0.15 * sRisk).toFixed(2));
+
       cells[key] = {
         resolution_level: meta.resName,
         cell_x: Number(meta.cx.toFixed(2)),
@@ -650,9 +733,208 @@ export class SimulationEngine {
         occupancy: Number(occ.toFixed(2)),
         point_count: cnt,
         roughness: Number(roughness.toFixed(3)),
+        is_refined: meta.isRefined,
+        navigation_importance: navImportance,
       };
     }
   }
+
+  /**
+   * Deterministic Collision Avoidance & Hazard Response State Machine.
+   * Evaluates corridor clearances strictly from 2.5D SemanticMap cells (Zero Ground Truth Leakage).
+   */
+  private evaluateAvoidanceState(
+    cells: Record<string, GridCellData>,
+    currentSpeedMps: number
+  ): import('../types').AvoidanceState {
+    let forwardClearance = 50.0;
+    let leftClearance = 50.0;
+    let rightClearance = 50.0;
+    let criticalObstacle: GridCellData | null = null;
+    let minForwardDist = 50.0;
+
+    const nonTraversableClasses = new Set([1, 2, 3, 4, 5, 6, 7]);
+
+    for (const [, cell] of Object.entries(cells)) {
+      if (cell.cell_x <= 0.4 || cell.cell_x > 50.0) continue;
+
+      const dist = Math.hypot(cell.cell_x, cell.cell_y);
+      const isObstacle =
+        nonTraversableClasses.has(cell.semantic_class) ||
+        (cell.occupancy ?? 0) > 0.40 ||
+        cell.roughness > 0.12 ||
+        cell.elevation <= -0.06;
+
+      if (!isObstacle) continue;
+
+      // 1. Center Forward Driving Corridor (|Y| <= 1.35m)
+      if (Math.abs(cell.cell_y) <= 1.35) {
+        if (dist < forwardClearance) {
+          forwardClearance = dist;
+          if (dist < minForwardDist) {
+            minForwardDist = dist;
+            criticalObstacle = cell;
+          }
+        }
+      }
+      // 2. Left Bypass Corridor (Y in [1.2, 3.6])
+      else if (cell.cell_y >= 1.2 && cell.cell_y <= 3.6) {
+        if (dist < leftClearance) {
+          leftClearance = dist;
+        }
+      }
+      // 3. Right Bypass Corridor (Y in [-3.6, -1.2])
+      else if (cell.cell_y >= -3.6 && cell.cell_y <= -1.2) {
+        if (dist < rightClearance) {
+          rightClearance = dist;
+        }
+      }
+    }
+
+    const speedMargin = currentSpeedMps > 0.1 ? (currentSpeedMps * 0.5 + (currentSpeedMps * currentSpeedMps) / 9.0) : 0.0;
+    const safeDist = 16.0 + speedMargin * 0.5;
+    const cautionDist = 8.0 + speedMargin * 0.3;
+    const critDist = 3.2;
+
+    let state: 'SAFE' | 'CAUTION' | 'HIGH_RISK' | 'EMERGENCY_STOP' = 'SAFE';
+    let riskLevel: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL' = 'LOW';
+    let recommendedAction = 'MAINTAIN CRUISE SPEED';
+    let direction: 'CENTER' | 'LEFT' | 'RIGHT' | 'STOP' = 'CENTER';
+    let targetSpeedKmh = 35.0;
+    let targetSteerAngle = 0.0;
+    let isEmergencyStop = false;
+    let localRefinementActive = false;
+
+    if (forwardClearance >= safeDist) {
+      state = 'SAFE';
+      riskLevel = 'LOW';
+      recommendedAction = 'SAFE — PATH CLEAR';
+      direction = 'CENTER';
+      targetSpeedKmh = 35.0;
+      targetSteerAngle = 0.0;
+      isEmergencyStop = false;
+      localRefinementActive = false;
+      this.lastAvoidanceDirection = 'CENTER';
+      this.avoidanceLockFrames = 0;
+    } else if (forwardClearance >= cautionDist) {
+      state = 'CAUTION';
+      riskLevel = 'MEDIUM';
+      recommendedAction = `OBSTACLE AHEAD (${forwardClearance.toFixed(1)}m) — REDUCE SPEED`;
+      direction = 'CENTER';
+      targetSpeedKmh = 15.0;
+      targetSteerAngle = 0.0;
+      isEmergencyStop = false;
+      localRefinementActive = true;
+      this.lastAvoidanceDirection = 'CENTER';
+      this.avoidanceLockFrames = 0;
+    } else if (forwardClearance >= critDist) {
+      state = 'HIGH_RISK';
+      riskLevel = 'HIGH';
+      localRefinementActive = true;
+
+      const reqLateral = Math.max(4.0, forwardClearance + 2.0);
+      const leftSafe = leftClearance >= reqLateral;
+      const rightSafe = rightClearance >= reqLateral;
+
+      // Hysteresis lock persistence
+      if (this.avoidanceLockFrames > 0 && (this.lastAvoidanceDirection === 'LEFT' || this.lastAvoidanceDirection === 'RIGHT')) {
+        if (this.lastAvoidanceDirection === 'LEFT' && leftSafe) {
+          direction = 'LEFT';
+          this.avoidanceLockFrames--;
+        } else if (this.lastAvoidanceDirection === 'RIGHT' && rightSafe) {
+          direction = 'RIGHT';
+          this.avoidanceLockFrames--;
+        } else {
+          this.avoidanceLockFrames = 0;
+        }
+      }
+
+      if (this.avoidanceLockFrames === 0) {
+        if (leftSafe && rightSafe) {
+          direction = leftClearance >= rightClearance ? 'LEFT' : 'RIGHT';
+          this.lastAvoidanceDirection = direction;
+          this.avoidanceLockFrames = 40; // 2.0s lock @ 20fps
+        } else if (leftSafe) {
+          direction = 'LEFT';
+          this.lastAvoidanceDirection = 'LEFT';
+          this.avoidanceLockFrames = 40;
+        } else if (rightSafe) {
+          direction = 'RIGHT';
+          this.lastAvoidanceDirection = 'RIGHT';
+          this.avoidanceLockFrames = 40;
+        } else {
+          state = 'EMERGENCY_STOP';
+          riskLevel = 'CRITICAL';
+          direction = 'STOP';
+          this.lastAvoidanceDirection = 'STOP';
+        }
+      }
+
+      if (direction === 'LEFT') {
+        recommendedAction = `HIGH RISK (${forwardClearance.toFixed(1)}m) — AVOIDANCE → LEFT`;
+        targetSpeedKmh = 18.0;
+        targetSteerAngle = 22.0;
+        isEmergencyStop = false;
+      } else if (direction === 'RIGHT') {
+        recommendedAction = `HIGH RISK (${forwardClearance.toFixed(1)}m) — AVOIDANCE → RIGHT`;
+        targetSpeedKmh = 18.0;
+        targetSteerAngle = -22.0;
+        isEmergencyStop = false;
+      } else {
+        recommendedAction = 'CRITICAL OBSTACLE (BOTH LANES BLOCKED) — EMERGENCY STOP';
+        targetSpeedKmh = 0.0;
+        targetSteerAngle = 0.0;
+        isEmergencyStop = true;
+      }
+    } else {
+      state = 'EMERGENCY_STOP';
+      riskLevel = 'CRITICAL';
+      recommendedAction = `CRITICAL PROXIMITY (${forwardClearance.toFixed(1)}m) — EMERGENCY STOP`;
+      direction = 'STOP';
+      targetSpeedKmh = 0.0;
+      targetSteerAngle = 0.0;
+      isEmergencyStop = true;
+      localRefinementActive = true;
+      this.lastAvoidanceDirection = 'STOP';
+      this.avoidanceLockFrames = 0;
+    }
+
+    this.lastAvoidanceState = state;
+
+    const obsDist = criticalObstacle ? forwardClearance : forwardClearance;
+    const obsY = criticalObstacle ? criticalObstacle.cell_y : 0.0;
+    const obsClass = criticalObstacle ? criticalObstacle.semantic_class : 0;
+
+    let refinedPatchInfo: import('../types').AvoidanceState['refinedPatchInfo'];
+    if (localRefinementActive && criticalObstacle) {
+      refinedPatchInfo = {
+        cx: criticalObstacle.cell_x,
+        cy: criticalObstacle.cell_y,
+        radius: 2.5,
+        targetResolution: 0.10,
+        sourceResolution: obsDist < 25.0 ? 0.10 : obsDist < 50.0 ? 0.20 : 0.50,
+      };
+    }
+
+    return {
+      state,
+      obstacleDistance: Number(obsDist.toFixed(2)),
+      obstacleLateralPos: Number(obsY.toFixed(2)),
+      obstacleClass: obsClass,
+      riskLevel,
+      recommendedAction,
+      avoidanceDirection: direction,
+      targetSpeedKmh: Number(targetSpeedKmh.toFixed(1)),
+      targetSteerAngle: Number(targetSteerAngle.toFixed(1)),
+      leftClearance: Number(leftClearance.toFixed(1)),
+      rightClearance: Number(rightClearance.toFixed(1)),
+      forwardClearance: Number(forwardClearance.toFixed(1)),
+      isEmergencyStop,
+      localRefinementActive,
+      refinedPatchInfo,
+    };
+  }
+
 
   /**
    * Genuine 2.5D Elevation Grid Hazard Detector (Observation-Derived Pipeline).

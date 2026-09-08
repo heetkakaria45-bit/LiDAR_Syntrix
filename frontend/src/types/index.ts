@@ -146,6 +146,30 @@ export const FOVEATION_RINGS: FoveationRing[] = [
   },
 ];
 
+export interface AvoidanceState {
+  state: 'SAFE' | 'CAUTION' | 'HIGH_RISK' | 'EMERGENCY_STOP';
+  obstacleDistance: number;
+  obstacleLateralPos: number;
+  obstacleClass: number;
+  riskLevel: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
+  recommendedAction: string;
+  avoidanceDirection: 'CENTER' | 'LEFT' | 'RIGHT' | 'STOP';
+  targetSpeedKmh: number;
+  targetSteerAngle: number;
+  leftClearance: number;
+  rightClearance: number;
+  forwardClearance: number;
+  isEmergencyStop: boolean;
+  localRefinementActive: boolean;
+  refinedPatchInfo?: {
+    cx: number;
+    cy: number;
+    radius: number;
+    targetResolution: number;
+    sourceResolution: number;
+  };
+}
+
 export interface GridCellData {
   resolution_level: string;
   cell_x: number;
@@ -159,6 +183,8 @@ export interface GridCellData {
   roughness: number;
   uncertainty?: number;
   occupancy?: number;
+  is_refined?: boolean;
+  navigation_importance?: number;
 }
 
 export interface HazardItem {
@@ -212,6 +238,9 @@ export interface TelemetryData {
     overhang_count: number;
     obstacle_count: number;
   };
+  avoidance?: AvoidanceState;
+  local_refinement_active?: boolean;
+  refined_cell_count?: number;
 }
 
 export interface FramePayload {
@@ -228,6 +257,7 @@ export interface FramePayload {
 
 export type ColorMode = 'foveated' | 'semantic' | 'elevation' | 'traversability' | 'intensity' | 'occupancy' | 'terrain_3d' | 'anomaly_3d';
 export type ScenarioType = 'urban' | 'highway' | 'offroad' | 'hazard_course' | 'pedestrian_cross' | 'slope_overhang';
+
 export type CameraViewPreset = 'birds_eye' | 'ego_follow' | 'cockpit' | 'isometric' | 'free';
 export type VideoBgMode = 'ambient' | 'pip' | 'off';
 

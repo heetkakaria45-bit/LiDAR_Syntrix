@@ -449,6 +449,153 @@ class FoveatedGridIndexer:
         refined_res = base_resolution * float(sem_factor * unc_factor)
         return float(np.clip(refined_res, 0.05, base_resolution))
 
+    def compute_navigation_importance(
+        self,
+        x: float,
+        y: float,
+        semantic_class: int = 0,
+        is_hazard: bool = False,
+        is_non_traversable: bool = False,
+        uncertainty: float = 0.0,
+        importance_config: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[float, Dict[str, float], bool]:
+        """Compute navigation-aware spatial importance for a given Cartesian coordinate.
+
+        Resolution is modeled as: Resolution = f(distance, navigation_importance).
+        Distance forms the foundational base policy, while navigation importance triggers
+        sparse local refinement around safety-critical hazards and corridor obstacles.
+
+        Args:
+            x: Forward coordinate in meters.
+            y: Lateral coordinate in meters.
+            semantic_class: Semantic class ID (0..7).
+            is_hazard: Geometric hazard flag (curb/pothole/step).
+            is_non_traversable: Traversability status flag.
+            uncertainty: Prediction or elevation uncertainty [0.0, 1.0].
+            importance_config: Optional weight overrides.
+
+        Returns:
+            Tuple of:
+                - total_score: Composite importance score in [0.0, 1.0]
+                - component_scores: Dict of individual score terms
+                - requires_refinement: True if score >= threshold and distance warrants refinement
+        """
+        cfg = importance_config or {}
+        w_dist = float(cfg.get("distance_weight", 0.25))
+        w_sem = float(cfg.get("semantic_weight", 0.35))
+        w_haz = float(cfg.get("hazard_weight", 0.25))
+        w_risk = float(cfg.get("risk_weight", 0.15))
+        threshold = float(cfg.get("refinement_threshold", 0.60))
+        corridor_width = float(cfg.get("corridor_width", 3.6))
+        corridor_max_dist = float(cfg.get("corridor_max_dist", 50.0))
+
+        # Semantic class priority weighting
+        semantic_weights = {
+            0: 0.10,  # DRIVABLE_GROUND
+            1: 0.40,  # NON_DRIVABLE_TERRAIN
+            2: 0.90,  # VEHICLE
+            3: 1.00,  # PEDESTRIAN (Highest priority VRU)
+            4: 1.00,  # CYCLIST (Highest priority VRU)
+            5: 0.60,  # POLE
+            6: 0.80,  # WALL_BUILDING
+            7: 0.75,  # OTHER_OBSTACLE
+        }
+        s_sem = float(semantic_weights.get(semantic_class, 0.50))
+
+        r = float(math.hypot(x, y))
+
+        # Distance & Corridor Importance: objects in direct forward driving corridor receive higher weight
+        in_corridor = (x > 0.0) and (abs(y) <= (corridor_width / 2.0))
+        if in_corridor:
+            s_dist = max(0.0, 1.0 - (r / corridor_max_dist))
+        else:
+            s_dist = 0.30 * max(0.0, 1.0 - (r / self._max_radius))
+
+        # Hazard Importance
+        s_haz = 1.0 if is_hazard else 0.0
+
+        # Traversability Risk Importance
+        s_risk = 1.0 if is_non_traversable else (0.5 if uncertainty > 0.6 else 0.0)
+
+        # Composite Importance Score
+        total_score = float(
+            np.clip(
+                w_dist * s_dist + w_sem * s_sem + w_haz * s_haz + w_risk * s_risk,
+                0.0,
+                1.0,
+            )
+        )
+
+        # Local refinement is triggered when importance exceeds threshold in mid/far coarse rings
+        requires_refinement = bool(total_score >= threshold and r >= 10.0 and r < self._max_radius)
+
+        component_scores = {
+            "distance_score": float(s_dist),
+            "semantic_score": float(s_sem),
+            "hazard_score": float(s_haz),
+            "risk_score": float(s_risk),
+            "total_score": float(total_score),
+        }
+
+        return total_score, component_scores, requires_refinement
+
+    def refine_local_patch(
+        self,
+        points: np.ndarray,
+        center_x: float,
+        center_y: float,
+        radius: float = 2.5,
+        target_resolution: float = 0.10,
+    ) -> Dict[Tuple[int, int], Tuple[float, float, np.ndarray]]:
+        """Extract and refine only the localized region surrounding a critical obstacle/hazard.
+
+        Preserves the core SYNTRIX advantage: fine where needed, coarse where unnecessary.
+        Does NOT coarsen or re-grid the entire ring, only the local bounding patch B(center, radius).
+
+        Args:
+            points: np.ndarray of shape (N, 3) representing LiDAR points.
+            center_x: Obstacle center X coordinate in meters.
+            center_y: Obstacle center Y coordinate in meters.
+            radius: Local refinement radius in meters (default 2.5m).
+            target_resolution: Desired fine cell resolution (default 0.10m).
+
+        Returns:
+            Dictionary mapping (gx, gy) -> (cx, cy, point_indices) for the local refined patch.
+        """
+        if points.shape[0] == 0:
+            return {}
+
+        px = points[:, 0]
+        py = points[:, 1]
+        dist_to_center = np.hypot(px - center_x, py - center_y)
+
+        patch_mask = dist_to_center <= radius
+        patch_indices = np.nonzero(patch_mask)[0]
+        if patch_indices.size == 0:
+            return {}
+
+        res = target_resolution
+        gx = np.floor(px[patch_indices] / res).astype(np.int32)
+        gy = np.floor(py[patch_indices] / res).astype(np.int32)
+
+        keys = np.stack([gx, gy], axis=1)
+        unique_keys, inverse_idx, counts = np.unique(
+            keys, axis=0, return_inverse=True, return_counts=True
+        )
+
+        order = np.argsort(inverse_idx, kind="stable")
+        sorted_indices = patch_indices[order]
+        splits = np.split(sorted_indices, np.cumsum(counts)[:-1])
+
+        half_res = res / 2.0
+        refined_cells: Dict[Tuple[int, int], Tuple[float, float, np.ndarray]] = {}
+        for (cx_idx, cy_idx), cell_pt_indices in zip(unique_keys, splits):
+            cx = float(cx_idx * res + half_res)
+            cy = float(cy_idx * res + half_res)
+            refined_cells[(int(cx_idx), int(cy_idx))] = (cx, cy, cell_pt_indices)
+
+        return refined_cells
+
 
 
     def world_to_cell_batch(self, points: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:

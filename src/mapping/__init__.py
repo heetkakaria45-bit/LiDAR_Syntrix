@@ -42,10 +42,21 @@ from src.mapping.terrain import (
     compute_traversability_score,
 )
 
+from src.mapping.avoidance import (
+    AvoidanceConfig,
+    AvoidanceDirection,
+    HazardAvoidanceEngine,
+    HazardState,
+)
+
 __all__ = [
     "MappingConfig",
     "TraversabilityConfig",
     "HazardConfig",
+    "AvoidanceConfig",
+    "HazardAvoidanceEngine",
+    "HazardState",
+    "AvoidanceDirection",
     "compute_elevation_bounds",
     "compute_roughness",
     "aggregate_semantics",
@@ -68,3 +79,4 @@ __all__ = [
     "detect_overhang_cells",
     "detect_map_hazards",
 ]
+

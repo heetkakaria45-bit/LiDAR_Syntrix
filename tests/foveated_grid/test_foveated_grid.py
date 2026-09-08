@@ -1,7 +1,7 @@
-"""Unit tests for Foveated Spatial Grid module."""
-
+import math
 import numpy as np
 from src.foveated_grid import FoveatedGridIndexer, FoveationRing
+
 
 
 def test_foveation_ring_ranges() -> None:
@@ -76,3 +76,51 @@ def test_adaptive_refinement_formula() -> None:
     )
     assert refined < base_res
     assert refined >= 0.05
+
+
+def test_navigation_importance_scoring() -> None:
+    """Ensure navigation-critical obstacles in path receive high importance score."""
+    indexer = FoveatedGridIndexer()
+
+    # Pedestrian (class 3) in forward corridor at 15m
+    score_ped, components_ped, req_refine_ped = indexer.compute_navigation_importance(
+        x=15.0, y=0.5, semantic_class=3, is_hazard=False, is_non_traversable=True
+    )
+    assert score_ped >= 0.60
+    assert req_refine_ped is True
+    assert components_ped["semantic_score"] == 1.0
+
+    # Drivable road background (class 0) at 40m
+    score_road, _, req_refine_road = indexer.compute_navigation_importance(
+        x=40.0, y=10.0, semantic_class=0, is_hazard=False, is_non_traversable=False
+    )
+    assert score_road < 0.40
+    assert req_refine_road is False
+
+
+def test_sparse_local_patch_refinement() -> None:
+    """Ensure local patch refinement refines only points in the obstacle radius."""
+    indexer = FoveatedGridIndexer()
+
+    # Generate synthetic points around obstacle at (30.0, 0.0)
+    pts_hazard = np.random.uniform(-1.0, 1.0, size=(50, 3)).astype(np.float32)
+    pts_hazard[:, 0] += 30.0  # Center around (30, 0)
+
+    # Distant points far from hazard (e.g. at 45m)
+    pts_far = np.random.uniform(-1.0, 1.0, size=(50, 3)).astype(np.float32)
+    pts_far[:, 0] += 45.0
+    pts_far[:, 1] += 15.0
+
+    all_pts = np.vstack([pts_hazard, pts_far])
+
+    # Refine only local patch at (30.0, 0.0) with radius 2.5m down to 10cm (0.10m)
+    refined_cells = indexer.refine_local_patch(
+        all_pts, center_x=30.0, center_y=0.0, radius=2.5, target_resolution=0.10
+    )
+
+    assert len(refined_cells) > 0
+    # All refined cells should be centered near (30.0, 0.0) within radius + resolution
+    for _, (cx, cy, indices) in refined_cells.items():
+        assert math.hypot(cx - 30.0, cy - 0.0) <= 3.5
+        assert len(indices) > 0
+

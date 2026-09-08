@@ -213,6 +213,9 @@ export const LidarViewport: React.FC<LidarViewportProps> = ({
   const [selectedAnomaly, setSelectedAnomaly] = useState<SelectedAnomalyData | null>(null);
   const [activeCameraPreset, setActiveCameraPreset] = useState<CameraViewPreset>('isometric');
   const [isFullscreen, setIsFullscreen] = useState<boolean>(!!document.fullscreenElement);
+  const [showAvoidanceHUD, setShowAvoidanceHUD] = useState<boolean>(true);
+  const avoidanceTrajectoryGroupRef = useRef<THREE.Group | null>(null);
+
 
   const teleopRef = useRef(teleop);
   useEffect(() => {
@@ -772,6 +775,11 @@ export const LidarViewport: React.FC<LidarViewportProps> = ({
     scene.add(axesGroup);
     axesGroupRef.current = axesGroup;
 
+    const avoidanceTrajectoryGroup = new THREE.Group();
+    scene.add(avoidanceTrajectoryGroup);
+    avoidanceTrajectoryGroupRef.current = avoidanceTrajectoryGroup;
+
+
     // Build Static Spatial Elements
     buildFoveatedSpatialGrid(foveatedGridGroup);
     buildFoveatedZoneDiscs(zoneDiscsGroup);
@@ -801,10 +809,81 @@ export const LidarViewport: React.FC<LidarViewportProps> = ({
     let pulseTime = 0;
     let wheelRotation = 0;
     let pedWalkProgress = 0;
+    // Avoidance Navigation Trajectory Visualizer
+    const updateAvoidanceTrajectoryVisualizer = (
+      group: THREE.Group | null,
+      avoidance: import('../../types').AvoidanceState | undefined,
+      egoX: number
+    ) => {
+      if (!group) return;
+      while (group.children.length > 0) {
+        const child = group.children[0];
+        group.remove(child);
+        if ((child as any).geometry) (child as any).geometry.dispose();
+        if ((child as any).material) (child as any).material.dispose();
+      }
+
+      if (!avoidance) return;
+
+      if (avoidance.state === 'SAFE') {
+        // Forward clear green path line
+        const points: THREE.Vector3[] = [];
+        for (let z = 0; z >= -24; z -= 1.5) {
+          points.push(new THREE.Vector3(egoX, 0.08, z));
+        }
+        const geom = new THREE.BufferGeometry().setFromPoints(points);
+        const mat = new THREE.LineBasicMaterial({ color: 0x10b981, linewidth: 2, transparent: true, opacity: 0.85 });
+        const line = new THREE.Line(geom, mat);
+        group.add(line);
+      } else if (avoidance.state === 'CAUTION') {
+        // Deceleration amber warning path
+        const points: THREE.Vector3[] = [];
+        for (let z = 0; z >= -18; z -= 1.5) {
+          points.push(new THREE.Vector3(egoX, 0.08, z));
+        }
+        const geom = new THREE.BufferGeometry().setFromPoints(points);
+        const mat = new THREE.LineDashedMaterial({ color: 0xf59e0b, dashSize: 0.8, gapSize: 0.4, transparent: true, opacity: 0.9 });
+        const line = new THREE.Line(geom, mat);
+        line.computeLineDistances();
+        group.add(line);
+      } else if (avoidance.state === 'HIGH_RISK') {
+        // Curved tactical avoidance maneuver trajectory
+        const targetX = avoidance.avoidanceDirection === 'LEFT' ? -2.4 : 2.4;
+        const curve = new THREE.QuadraticBezierCurve3(
+          new THREE.Vector3(egoX, 0.08, 0.0),
+          new THREE.Vector3(targetX * 0.7, 0.08, -6.0),
+          new THREE.Vector3(targetX, 0.08, -18.0)
+        );
+        const curvePoints = curve.getPoints(30);
+        const geom = new THREE.BufferGeometry().setFromPoints(curvePoints);
+        const mat = new THREE.LineBasicMaterial({ color: 0x00f0ff, linewidth: 3, transparent: true, opacity: 0.95 });
+        const line = new THREE.Line(geom, mat);
+        group.add(line);
+
+        // Trajectory direction cone
+        const arrowGeom = new THREE.ConeGeometry(0.35, 0.9, 8);
+        const arrowMat = new THREE.MeshBasicMaterial({ color: 0x00f0ff, transparent: true, opacity: 0.9 });
+        const arrow = new THREE.Mesh(arrowGeom, arrowMat);
+        arrow.position.set(targetX, 0.1, -18.0);
+        arrow.rotation.x = -Math.PI / 2;
+        group.add(arrow);
+      } else if (avoidance.state === 'EMERGENCY_STOP') {
+        // Red stopping safety barrier
+        const stopGeom = new THREE.PlaneGeometry(3.6, 0.25);
+        const stopMat = new THREE.MeshBasicMaterial({ color: 0xef4444, side: THREE.DoubleSide, transparent: true, opacity: 0.95 });
+        const stopBar = new THREE.Mesh(stopGeom, stopMat);
+        stopBar.position.set(egoX, 0.08, -3.2);
+        stopBar.rotation.x = -Math.PI / 2;
+        group.add(stopBar);
+      }
+    };
+
     let currentLaneX = 0.0;
 
     const animate = () => {
       animationFrameId = requestAnimationFrame(animate);
+
+
       controls.update();
 
       pulseTime += 0.04;
@@ -1034,8 +1113,29 @@ export const LidarViewport: React.FC<LidarViewportProps> = ({
 
       // 5. Dynamic Ego Rover steering, lane selection, wheel spin & collision detection
       if (egoVehicleRef.current) {
-        // Persistent Lane Shift:
-        if (Math.abs(steer) > 1) {
+        // Intelligent Avoidance Assist & Autonomous Corridor Maneuver
+        const avoidance = latestFrameRef.current?.telemetry?.avoidance;
+        let effectiveSteer = steer;
+
+        if (curTeleop?.mode === 'autonomous' && avoidance) {
+          if (avoidance.state === 'HIGH_RISK') {
+            if (avoidance.avoidanceDirection === 'LEFT') {
+              currentLaneX = THREE.MathUtils.clamp(THREE.MathUtils.lerp(currentLaneX, -2.4, 0.06), -3.6, 3.6);
+              effectiveSteer = 22.0;
+              onUpdateTeleopRef.current?.((prev) => ({ ...prev, laneX: currentLaneX }));
+            } else if (avoidance.avoidanceDirection === 'RIGHT') {
+              currentLaneX = THREE.MathUtils.clamp(THREE.MathUtils.lerp(currentLaneX, 2.4, 0.06), -3.6, 3.6);
+              effectiveSteer = -22.0;
+              onUpdateTeleopRef.current?.((prev) => ({ ...prev, laneX: currentLaneX }));
+            }
+          } else if (avoidance.state === 'SAFE') {
+            if (Math.abs(currentLaneX) > 0.05) {
+              currentLaneX = THREE.MathUtils.lerp(currentLaneX, 0.0, 0.03);
+              onUpdateTeleopRef.current?.((prev) => ({ ...prev, laneX: currentLaneX }));
+            }
+          }
+        } else if (Math.abs(steer) > 1) {
+          // Persistent Lane Shift from manual WASD:
           const steerSign = steer / 22;
           const lateralRate = 0.045;
           currentLaneX = THREE.MathUtils.clamp(currentLaneX + steerSign * lateralRate, -3.6, 3.6);
@@ -1046,7 +1146,7 @@ export const LidarViewport: React.FC<LidarViewportProps> = ({
         egoVehicleRef.current.position.x = THREE.MathUtils.lerp(egoVehicleRef.current.position.x, currentLaneX, 0.12);
 
         // Realistic Yaw turning:
-        const steerNorm = THREE.MathUtils.clamp(steer / 22, -1.0, 1.0);
+        const steerNorm = THREE.MathUtils.clamp(effectiveSteer / 22, -1.0, 1.0);
         const targetYaw = -steerNorm * (20 * Math.PI / 180);
         egoVehicleRef.current.rotation.y = THREE.MathUtils.lerp(egoVehicleRef.current.rotation.y, targetYaw, 0.12);
 
@@ -1060,6 +1160,10 @@ export const LidarViewport: React.FC<LidarViewportProps> = ({
           const targetWheelAngle = -steerNorm * (28 * Math.PI / 180);
           frontWheels.rotation.y = THREE.MathUtils.lerp(frontWheels.rotation.y, targetWheelAngle, 0.15);
         }
+
+        // Update Three.js Avoidance Trajectory Line Visualizer
+        updateAvoidanceTrajectoryVisualizer(avoidanceTrajectoryGroupRef.current, avoidance, egoVehicleRef.current.position.x);
+
 
         // Wheel rotation for forward & reverse
         if (Math.abs(speed) > 0.05) {
@@ -3744,8 +3848,118 @@ export const LidarViewport: React.FC<LidarViewportProps> = ({
         );
       })()}
 
+      {/* BOTTOM-LEFT HAZARD WARNING & INTELLIGENT AVOIDANCE HUD */}
+      {showAvoidanceHUD && frame?.telemetry?.avoidance && (
+        <div className="absolute bottom-4 left-4 z-20 w-[320px] pointer-events-auto font-sans select-none animate-in slide-in-from-bottom-6 duration-200">
+          {(() => {
+            const av = frame.telemetry.avoidance;
+            const isSafe = av.state === 'SAFE';
+            const isCaution = av.state === 'CAUTION';
+            const isHighRisk = av.state === 'HIGH_RISK';
+            const isEStop = av.state === 'EMERGENCY_STOP';
+
+            const badgeBg = isSafe
+              ? 'bg-slate-950/95 border-hud-emerald/50 shadow-lg'
+              : isCaution
+              ? 'bg-amber-950/90 border-amber-500/60 shadow-amber-glow'
+              : isHighRisk
+              ? 'bg-cyan-950/90 border-cyan-400/80 shadow-cyan-glow-sm'
+              : 'bg-red-950/95 border-red-500 shadow-xl animate-pulse';
+
+            const dotColor = isSafe
+              ? 'bg-hud-emerald shadow-emerald-glow-sm'
+              : isCaution
+              ? 'bg-amber-400 animate-pulse shadow-amber-glow'
+              : isHighRisk
+              ? 'bg-hud-cyan animate-ping shadow-cyan-glow-sm'
+              : 'bg-red-500 animate-ping';
+
+            const actionTextColor = isSafe
+              ? 'text-hud-emerald'
+              : isCaution
+              ? 'text-amber-300'
+              : isHighRisk
+              ? 'text-hud-cyan'
+              : 'text-red-300 font-black';
+
+            return (
+              <div className={`glass-panel p-3 rounded-2xl border ${badgeBg} shadow-2xl backdrop-blur-2xl flex flex-col gap-2 bg-[#0c111a]/95 tech-box`}>
+                {/* Header */}
+                <div className="flex items-center justify-between pb-1.5 border-b border-slate-800/80">
+                  <div className="flex items-center gap-2">
+                    <span className={`w-2.5 h-2.5 rounded-full ${dotColor}`} />
+                    <span className="text-[11px] font-bold text-white font-mono tracking-wider uppercase">
+                      HAZARD RESPONSE
+                    </span>
+                  </div>
+                  <span className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded-lg border ${
+                    isSafe
+                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                      : isCaution
+                      ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                      : isHighRisk
+                      ? 'bg-cyan-500/20 text-cyan-300 border-cyan-400/50'
+                      : 'bg-red-500/30 text-red-200 border-red-500/60'
+                  }`}>
+                    {av.state}
+                  </span>
+                </div>
+
+                {/* Primary Action & Avoidance Direction Banner */}
+                <div className="flex items-center justify-between bg-black/60 p-2 rounded-xl border border-slate-800/90">
+                  <div className="flex items-center gap-2">
+                    {isHighRisk && av.avoidanceDirection === 'LEFT' && <ArrowLeft className="w-4 h-4 text-hud-cyan animate-bounce shrink-0" />}
+                    {isHighRisk && av.avoidanceDirection === 'RIGHT' && <ArrowRight className="w-4 h-4 text-hud-cyan animate-bounce shrink-0" />}
+                    {isCaution && <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />}
+                    {isEStop && <ShieldAlert className="w-4 h-4 text-red-400 shrink-0" />}
+                    {isSafe && <Navigation className="w-4 h-4 text-hud-emerald shrink-0" />}
+                    <span className={`text-[11px] font-mono font-bold ${actionTextColor} leading-tight`}>
+                      {av.recommendedAction}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Corridor Free-Space Clearance Matrix (Observation Derived) */}
+                <div className="grid grid-cols-3 gap-1.5 text-center font-mono text-[10px]">
+                  <div className="p-1 rounded-lg bg-slate-900/80 border border-slate-800">
+                    <div className="text-slate-500 text-[8.5px]">LEFT LANE</div>
+                    <div className={`font-bold ${av.leftClearance < 6.0 ? 'text-red-400' : 'text-slate-200'}`}>
+                      {av.leftClearance >= 45 ? '>45m' : `${av.leftClearance.toFixed(1)}m`}
+                    </div>
+                  </div>
+                  <div className="p-1 rounded-lg bg-slate-900/80 border border-slate-800">
+                    <div className="text-slate-500 text-[8.5px]">FORWARD</div>
+                    <div className={`font-bold ${av.forwardClearance < 8.0 ? 'text-amber-300' : 'text-slate-200'}`}>
+                      {av.forwardClearance >= 45 ? '>45m' : `${av.forwardClearance.toFixed(1)}m`}
+                    </div>
+                  </div>
+                  <div className="p-1 rounded-lg bg-slate-900/80 border border-slate-800">
+                    <div className="text-slate-500 text-[8.5px]">RIGHT LANE</div>
+                    <div className={`font-bold ${av.rightClearance < 6.0 ? 'text-red-400' : 'text-slate-200'}`}>
+                      {av.rightClearance >= 45 ? '>45m' : `${av.rightClearance.toFixed(1)}m`}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Adaptive Foveation Local Refinement Status */}
+                <div className="flex items-center justify-between pt-1 border-t border-slate-800/80 text-[9.5px] font-mono text-slate-400">
+                  <span className="flex items-center gap-1">
+                    <Sparkles className="w-3 h-3 text-purple-400" />
+                    <span>FOVEATION:</span>
+                  </span>
+                  <span className={`font-semibold ${av.localRefinementActive ? 'text-purple-300 font-bold' : 'text-slate-400'}`}>
+                    {av.localRefinementActive ? '10cm LOCAL REFINED @ HAZARD' : '4-ZONE DISTANCE BASE'}
+                  </span>
+                </div>
+              </div>
+            );
+          })()}
+        </div>
+      )}
+
       {/* BOTTOM-RIGHT POV ROTATION & ZOOM TOOLBAR */}
       <div className="absolute bottom-4 right-4 z-20 flex items-center gap-1.5 pointer-events-auto font-mono text-xs">
+
         <div className="glass-panel p-1.5 rounded-2xl flex items-center gap-1 bg-slate-950/80 border border-slate-700/60 shadow-xl">
           <button
             onClick={orbitLeft}
