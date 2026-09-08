@@ -809,7 +809,7 @@ export const LidarViewport: React.FC<LidarViewportProps> = ({
     let pulseTime = 0;
     let wheelRotation = 0;
     let pedWalkProgress = 0;
-    // Avoidance Navigation Trajectory Visualizer
+    // Avoidance Navigation Trajectory & Tactical Directional Arrow Visualizer
     const updateAvoidanceTrajectoryVisualizer = (
       group: THREE.Group | null,
       avoidance: import('../../types').AvoidanceState | undefined,
@@ -825,58 +825,277 @@ export const LidarViewport: React.FC<LidarViewportProps> = ({
 
       if (!avoidance) return;
 
+      // High-contrast multi-layer trajectory ribbon
+      const createRibbon = (points: THREE.Vector3[], width: number, color: number, opacity = 0.88) => {
+        if (points.length < 2) return;
+
+        // Dark contrast underlay ribbon
+        const underlayWidth = width + 0.18;
+        const createRibbonMesh = (w: number, col: number, op: number, yOffset: number) => {
+          const positions: number[] = [];
+          const halfW = w / 2;
+
+          for (let i = 0; i < points.length; i++) {
+            const p = points[i];
+            let tangent: THREE.Vector3;
+            if (i === 0) {
+              tangent = new THREE.Vector3().subVectors(points[1], points[0]).normalize();
+            } else if (i === points.length - 1) {
+              tangent = new THREE.Vector3().subVectors(points[i], points[i - 1]).normalize();
+            } else {
+              tangent = new THREE.Vector3().subVectors(points[i + 1], points[i - 1]).normalize();
+            }
+            const normal = new THREE.Vector3(-tangent.z, 0, tangent.x).normalize();
+
+            const left = new THREE.Vector3().copy(p).addScaledVector(normal, halfW);
+            const right = new THREE.Vector3().copy(p).addScaledVector(normal, -halfW);
+
+            positions.push(left.x, left.y + yOffset, left.z);
+            positions.push(right.x, right.y + yOffset, right.z);
+          }
+
+          const indices: number[] = [];
+          for (let i = 0; i < points.length - 1; i++) {
+            const i0 = i * 2;
+            const i1 = i * 2 + 1;
+            const i2 = (i + 1) * 2;
+            const i3 = (i + 1) * 2 + 1;
+            indices.push(i0, i1, i2);
+            indices.push(i1, i3, i2);
+          }
+
+          const geom = new THREE.BufferGeometry();
+          geom.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+          geom.setIndex(indices);
+          geom.computeVertexNormals();
+
+          const mat = new THREE.MeshBasicMaterial({
+            color: col,
+            side: THREE.DoubleSide,
+            transparent: true,
+            opacity: op,
+            depthWrite: false,
+          });
+          return new THREE.Mesh(geom, mat);
+        };
+
+        // Add underlay and main colored ribbon
+        group.add(createRibbonMesh(underlayWidth, 0x020617, 0.85, 0.00));
+        group.add(createRibbonMesh(width, color, opacity, 0.01));
+      };
+
+      // Sharp, prominent 3D tactical arrowhead geometry (───────────────►)
+      const createArrowhead = (
+        pos: THREE.Vector3,
+        dir: THREE.Vector3,
+        length: number,
+        width: number,
+        color: number,
+        opacity = 0.98,
+        isTerminal = false
+      ) => {
+        const tangent = new THREE.Vector3(dir.x, 0, dir.z).normalize();
+        const normal = new THREE.Vector3(-tangent.z, 0, tangent.x).normalize();
+
+        const halfW = width / 2;
+        const barbSweep = length * 0.16; // Swept-back barb wings
+        const recessDepth = length * 0.26; // Inner notch recess
+        const yBase = pos.y + 0.02;
+        const yRidge = yBase + (isTerminal ? 0.08 : 0.05);
+
+        // Key geometric vertices
+        const tip = new THREE.Vector3().copy(pos).addScaledVector(tangent, length);
+        tip.y = yBase;
+
+        const leftWing = new THREE.Vector3().copy(pos).addScaledVector(normal, halfW).addScaledVector(tangent, -barbSweep);
+        leftWing.y = yBase;
+
+        const rightWing = new THREE.Vector3().copy(pos).addScaledVector(normal, -halfW).addScaledVector(tangent, -barbSweep);
+        rightWing.y = yBase;
+
+        const notch = new THREE.Vector3().copy(pos).addScaledVector(tangent, recessDepth);
+        notch.y = yBase;
+
+        const ridge = new THREE.Vector3().copy(pos).addScaledVector(tangent, length * 0.52);
+        ridge.y = yRidge;
+
+        // 1. Dark contrast drop shadow underlay
+        const underlayScale = 1.15;
+        const uTip = new THREE.Vector3().copy(pos).addScaledVector(tangent, length * underlayScale);
+        uTip.y = pos.y - 0.005;
+        const uLeft = new THREE.Vector3().copy(pos).addScaledVector(normal, halfW * underlayScale).addScaledVector(tangent, -barbSweep * 1.2);
+        uLeft.y = pos.y - 0.005;
+        const uRight = new THREE.Vector3().copy(pos).addScaledVector(normal, -halfW * underlayScale).addScaledVector(tangent, -barbSweep * 1.2);
+        uRight.y = pos.y - 0.005;
+        const uNotch = new THREE.Vector3().copy(pos).addScaledVector(tangent, recessDepth * 0.9);
+        uNotch.y = pos.y - 0.005;
+
+        const shadowGeom = new THREE.BufferGeometry();
+        const shadowVerts = new Float32Array([
+          uTip.x, uTip.y, uTip.z,
+          uLeft.x, uLeft.y, uLeft.z,
+          uNotch.x, uNotch.y, uNotch.z,
+
+          uTip.x, uTip.y, uTip.z,
+          uNotch.x, uNotch.y, uNotch.z,
+          uRight.x, uRight.y, uRight.z,
+        ]);
+        shadowGeom.setAttribute('position', new THREE.BufferAttribute(shadowVerts, 3));
+        shadowGeom.computeVertexNormals();
+        const shadowMat = new THREE.MeshBasicMaterial({
+          color: 0x020617,
+          side: THREE.DoubleSide,
+          transparent: true,
+          opacity: 0.85,
+          depthWrite: false,
+        });
+        group.add(new THREE.Mesh(shadowGeom, shadowMat));
+
+        // 2. 3D Faceted Solid Arrowhead (Faceted wings with elevated center spine)
+        const arrowGeom = new THREE.BufferGeometry();
+        const arrowVerts = new Float32Array([
+          // Left Wing Facet 1 (Forward)
+          tip.x, tip.y, tip.z,
+          leftWing.x, leftWing.y, leftWing.z,
+          ridge.x, ridge.y, ridge.z,
+
+          // Left Wing Facet 2 (Rear)
+          ridge.x, ridge.y, ridge.z,
+          leftWing.x, leftWing.y, leftWing.z,
+          notch.x, notch.y, notch.z,
+
+          // Right Wing Facet 1 (Forward)
+          tip.x, tip.y, tip.z,
+          ridge.x, ridge.y, ridge.z,
+          rightWing.x, rightWing.y, rightWing.z,
+
+          // Right Wing Facet 2 (Rear)
+          ridge.x, ridge.y, ridge.z,
+          notch.x, notch.y, notch.z,
+          rightWing.x, rightWing.y, rightWing.z,
+        ]);
+        arrowGeom.setAttribute('position', new THREE.BufferAttribute(arrowVerts, 3));
+        arrowGeom.computeVertexNormals();
+
+        const arrowMat = new THREE.MeshBasicMaterial({
+          color,
+          side: THREE.DoubleSide,
+          transparent: true,
+          opacity,
+          depthWrite: false,
+        });
+        const arrowMesh = new THREE.Mesh(arrowGeom, arrowMat);
+        group.add(arrowMesh);
+
+        // 3. Razor-sharp white perimeter outline
+        const borderPts = [tip, leftWing, notch, rightWing, tip];
+        const borderGeom = new THREE.BufferGeometry().setFromPoints(borderPts);
+        const borderMat = new THREE.LineBasicMaterial({
+          color: 0xffffff,
+          transparent: true,
+          opacity: 0.96,
+          linewidth: 2,
+        });
+        group.add(new THREE.Line(borderGeom, borderMat));
+
+        // 4. Luminous center spine line
+        const spinePts = [notch, ridge, tip];
+        const spineGeom = new THREE.BufferGeometry().setFromPoints(spinePts);
+        const spineMat = new THREE.LineBasicMaterial({
+          color: 0xffffff,
+          transparent: true,
+          opacity: 0.98,
+        });
+        group.add(new THREE.Line(spineGeom, spineMat));
+      };
+
       if (avoidance.state === 'SAFE') {
-        // Forward clear green path line
+        // Forward clear green path
         const points: THREE.Vector3[] = [];
-        for (let z = 0; z >= -24; z -= 1.5) {
+        for (let z = 0; z >= -22; z -= 1.0) {
           points.push(new THREE.Vector3(egoX, 0.08, z));
         }
-        const geom = new THREE.BufferGeometry().setFromPoints(points);
-        const mat = new THREE.LineBasicMaterial({ color: 0x10b981, linewidth: 2, transparent: true, opacity: 0.85 });
-        const line = new THREE.Line(geom, mat);
-        group.add(line);
+        createRibbon(points, 0.48, 0x10b981, 0.75);
+
+        // Intermediate flow chevrons
+        createArrowhead(new THREE.Vector3(egoX, 0.10, -8.0), new THREE.Vector3(0, 0, -1), 1.6, 1.2, 0x10b981, 0.85);
+        createArrowhead(new THREE.Vector3(egoX, 0.10, -15.0), new THREE.Vector3(0, 0, -1), 1.6, 1.2, 0x10b981, 0.85);
+
+        // Terminal prominent pointed arrowhead
+        createArrowhead(new THREE.Vector3(egoX, 0.11, -22.0), new THREE.Vector3(0, 0, -1), 2.8, 2.0, 0x10b981, 0.98, true);
       } else if (avoidance.state === 'CAUTION') {
         // Deceleration amber warning path
         const points: THREE.Vector3[] = [];
-        for (let z = 0; z >= -18; z -= 1.5) {
+        for (let z = 0; z >= -16; z -= 1.0) {
           points.push(new THREE.Vector3(egoX, 0.08, z));
         }
-        const geom = new THREE.BufferGeometry().setFromPoints(points);
-        const mat = new THREE.LineDashedMaterial({ color: 0xf59e0b, dashSize: 0.8, gapSize: 0.4, transparent: true, opacity: 0.9 });
-        const line = new THREE.Line(geom, mat);
-        line.computeLineDistances();
-        group.add(line);
+        createRibbon(points, 0.54, 0xf59e0b, 0.82);
+
+        // Intermediate flow chevrons
+        createArrowhead(new THREE.Vector3(egoX, 0.10, -6.5), new THREE.Vector3(0, 0, -1), 1.7, 1.3, 0xf59e0b, 0.88);
+        createArrowhead(new THREE.Vector3(egoX, 0.10, -11.5), new THREE.Vector3(0, 0, -1), 1.7, 1.3, 0xf59e0b, 0.88);
+
+        // Terminal prominent pointed arrowhead
+        createArrowhead(new THREE.Vector3(egoX, 0.11, -16.0), new THREE.Vector3(0, 0, -1), 3.0, 2.2, 0xf59e0b, 0.98, true);
       } else if (avoidance.state === 'HIGH_RISK') {
         // Curved tactical avoidance maneuver trajectory
-        const targetX = avoidance.avoidanceDirection === 'LEFT' ? -2.4 : 2.4;
-        const curve = new THREE.QuadraticBezierCurve3(
+        const targetX = avoidance.avoidanceDirection === 'LEFT' ? -2.6 : 2.6;
+        const curve = new THREE.CubicBezierCurve3(
           new THREE.Vector3(egoX, 0.08, 0.0),
-          new THREE.Vector3(targetX * 0.7, 0.08, -6.0),
+          new THREE.Vector3(egoX + (targetX - egoX) * 0.15, 0.08, -4.0),
+          new THREE.Vector3(targetX, 0.08, -10.5),
           new THREE.Vector3(targetX, 0.08, -18.0)
         );
-        const curvePoints = curve.getPoints(30);
-        const geom = new THREE.BufferGeometry().setFromPoints(curvePoints);
-        const mat = new THREE.LineBasicMaterial({ color: 0x00f0ff, linewidth: 3, transparent: true, opacity: 0.95 });
-        const line = new THREE.Line(geom, mat);
-        group.add(line);
 
-        // Trajectory direction cone
-        const arrowGeom = new THREE.ConeGeometry(0.35, 0.9, 8);
-        const arrowMat = new THREE.MeshBasicMaterial({ color: 0x00f0ff, transparent: true, opacity: 0.9 });
-        const arrow = new THREE.Mesh(arrowGeom, arrowMat);
-        arrow.position.set(targetX, 0.1, -18.0);
-        arrow.rotation.x = -Math.PI / 2;
-        group.add(arrow);
+        const curvePoints = curve.getPoints(40);
+        createRibbon(curvePoints, 0.62, 0x00f0ff, 0.88);
+
+        // Core bright highlight line along center of ribbon
+        const centerLineGeom = new THREE.BufferGeometry().setFromPoints(
+          curvePoints.map((p) => new THREE.Vector3(p.x, p.y + 0.02, p.z))
+        );
+        const centerLineMat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.95 });
+        const centerLine = new THREE.Line(centerLineGeom, centerLineMat);
+        group.add(centerLine);
+
+        // Intermediate Directional Flow Chevrons along the curve pointing in the evasive path direction
+        const tPositions = [0.30, 0.55, 0.78];
+        for (const t of tPositions) {
+          const pt = curve.getPoint(t);
+          const tan = curve.getTangent(t).normalize();
+          createArrowhead(new THREE.Vector3(pt.x, 0.11, pt.z), tan, 1.8, 1.4, 0x00f0ff, 0.90);
+        }
+
+        // Final Prominent Pointed Tactical Arrowhead at Destination Waypoint
+        const finalTangent = curve.getTangent(1.0).normalize();
+        createArrowhead(
+          new THREE.Vector3(targetX, 0.12, -18.0),
+          finalTangent,
+          3.2,
+          2.4,
+          0x00f0ff,
+          0.98,
+          true
+        );
       } else if (avoidance.state === 'EMERGENCY_STOP') {
         // Red stopping safety barrier
-        const stopGeom = new THREE.PlaneGeometry(3.6, 0.25);
-        const stopMat = new THREE.MeshBasicMaterial({ color: 0xef4444, side: THREE.DoubleSide, transparent: true, opacity: 0.95 });
+        const stopGeom = new THREE.PlaneGeometry(3.8, 0.45);
+        const stopMat = new THREE.MeshBasicMaterial({ color: 0xef4444, side: THREE.DoubleSide, transparent: true, opacity: 0.96 });
         const stopBar = new THREE.Mesh(stopGeom, stopMat);
-        stopBar.position.set(egoX, 0.08, -3.2);
+        stopBar.position.set(egoX, 0.10, -3.2);
         stopBar.rotation.x = -Math.PI / 2;
         group.add(stopBar);
+
+        // Hazard chevron stripes on stop bar
+        const stripeGeom = new THREE.BufferGeometry().setFromPoints([
+          new THREE.Vector3(egoX - 1.9, 0.11, -3.2),
+          new THREE.Vector3(egoX + 1.9, 0.11, -3.2)
+        ]);
+        const stripeMat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.95 });
+        group.add(new THREE.Line(stripeGeom, stripeMat));
       }
     };
+
 
     let currentLaneX = 0.0;
 
