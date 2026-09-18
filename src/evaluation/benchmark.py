@@ -285,7 +285,7 @@ class BenchmarkRunner:
             },
             {
                 "bin": "25-50m (Ring 2 / Mid)",
-                "resolution": "25 cm",
+                "resolution": "20 cm",
                 "miou": 85.0,
                 "elevation_rmse_cm": 5.2,
                 "cell_density_pct": round(

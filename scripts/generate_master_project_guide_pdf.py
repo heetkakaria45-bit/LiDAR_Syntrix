@@ -614,7 +614,7 @@ def build_pdf():
     story.append(Paragraph(
         "<b>Ring 0 (Near):</b> 0.0m <= r < 10.0m @ delta = 0.05m (5 cm) — Stopping zone<br/>"
         "<b>Ring 1 (Mid-Near):</b> 10.0m <= r < 25.0m @ delta = 0.10m (10 cm) — Steering zone<br/>"
-        "<b>Ring 2 (Mid):</b> 25.0m <= r < 50.0m @ delta = 0.25m (25 cm) — Tracking zone<br/>"
+        "<b>Ring 2 (Mid):</b> 25.0m <= r < 50.0m @ delta = 0.20m (20 cm) — Tracking zone<br/>"
         "<b>Ring 3 (Far):</b> 50.0m <= r <= 100.0m @ delta = 0.50m (50 cm) — Horizon zone<br/>"
         "<b>Cell Indexing:</b> i = floor(x / delta^(l)),   j = floor(y / delta^(l))<br/>"
         "<b>Reconstructed Centroid:</b> x_c = (i + 0.5) * delta^(l),   y_c = (j + 0.5) * delta^(l)",

@@ -3,7 +3,7 @@
 - **Owner:** Heet (Member 4)
 - **Subsystem:** `src/mapping/`, `tests/mapping/`
 - **Branch:** `integration/sih-2026`
-- **Status:** **COMPLETE & VERIFIED** (68/68 Subsystem Tests Green; 194/195 Repository Tests Green)
+- **Status:** **COMPLETE & VERIFIED** (68/68 Subsystem Tests Green; 203 passed, 1 skipped / 204 Repository Tests Green)
 
 ---
 

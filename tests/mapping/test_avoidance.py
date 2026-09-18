@@ -192,3 +192,42 @@ def test_anti_oscillation_hysteresis() -> None:
     # Step at t=11.5 (still within 2.0s lock): must retain initial direction
     dec3 = engine.compute_decision(smap, current_speed_mps=4.0, current_timestamp=11.5)
     assert dec3.avoidance_direction == initial_dir
+
+
+def test_speed_aware_stopping_distance_formula() -> None:
+    """Verify physical stopping distance calculation with SI units (m/s, m/s^2, m).
+
+    Formula: d_stop = v * t_react + v^2 / (2 * a_max)
+    For v = 10.0 m/s (36 km/h), t_react = 0.5 s, a_max = 4.5 m/s^2:
+        speed_margin = 10.0 * 0.5 + 100.0 / 9.0 = 5.0 + 11.111 = 16.111 m
+        eff_safe_distance = 16.0 + 16.111 * 0.5 = 24.056 m
+    """
+    engine = HazardAvoidanceEngine()
+    smap = create_mock_semantic_map([(20.0, 0.0, 2)])  # Obstacle at 20m ahead
+
+    # At stationary (0.0 m/s): 20m >= 16m threshold -> SAFE
+    dec_stat = engine.compute_decision(smap, current_speed_mps=0.0, current_timestamp=1.0)
+    assert dec_stat.state == HazardState.SAFE.value
+
+    # At speed 10.0 m/s (36 km/h): 20m < 24.056m effective threshold -> CAUTION
+    dec_fast = engine.compute_decision(smap, current_speed_mps=10.0, current_timestamp=2.0)
+    assert dec_fast.state == HazardState.CAUTION.value
+    assert dec_fast.recommended_action == "REDUCE_SPEED"
+
+
+def test_no_ground_truth_leakage() -> None:
+    """Verify that avoidance evaluation consumes solely 2.5D SemanticMap cells."""
+    engine = HazardAvoidanceEngine()
+
+    # Empty map (no perceived obstacle cells)
+    empty_map = create_mock_semantic_map([])
+    dec_empty = engine.compute_decision(empty_map, current_speed_mps=8.0, current_timestamp=1.0)
+    assert dec_empty.state == HazardState.SAFE.value
+    assert dec_empty.forward_clearance >= 50.0  # Max evaluation distance
+
+    # Add single obstacle cell at 5m
+    obs_map = create_mock_semantic_map([(5.0, 0.0, 2)])
+    dec_obs = engine.compute_decision(obs_map, current_speed_mps=8.0, current_timestamp=2.0)
+    assert dec_obs.forward_clearance == pytest.approx(5.0, abs=0.1)
+    assert dec_obs.state == HazardState.HIGH_RISK.value
+

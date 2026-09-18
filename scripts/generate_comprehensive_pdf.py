@@ -300,7 +300,7 @@ def build_pdf():
     ))
 
     story.append(Paragraph(
-        "<b>OUR SOLUTION:</b> A bio-inspired, variable-resolution <b>Foveated Semantic 2.5D Elevation Mapping Engine</b>. Inspired by the human fovea, we allocate high spatial resolution (5 cm) in the critical near-field (0–10m) where micro-maneuvers occur, while gracefully coarsening across concentric rings (10 cm, 25 cm, 50 cm) out to 100m. By compressing 3D point volumes into continuous 2.5D elevation cells with statistical roughness, occupancy probability, and confidence-weighted Bayesian semantics, we achieve <b>over 95% memory reduction</b>, a <b>7.5x latency acceleration</b>, and <b>zero near-field safety loss</b>.",
+        "<b>OUR SOLUTION:</b> A bio-inspired, variable-resolution <b>Foveated Semantic 2.5D Elevation Mapping Engine</b>. Inspired by the human fovea, we allocate high spatial resolution (5 cm) in the critical near-field (0–10m) where micro-maneuvers occur, while gracefully coarsening across concentric rings (10 cm, 20 cm, 50 cm) out to 100m. By compressing 3D point volumes into continuous 2.5D elevation cells with statistical roughness, occupancy probability, and confidence-weighted Bayesian semantics, we achieve <b>over 88% memory reduction</b>, a <b>3.6x latency acceleration</b>, and <b>zero near-field safety loss</b>.",
         styles["CalloutBox"]
     ))
 
@@ -314,7 +314,7 @@ def build_pdf():
     ))
     story.append(Paragraph("• <b>Level 0 (Near-Field, 0.0m to 10.0m):</b> delta = 0.05m (5 cm resolution) — Immediate stopping envelope.", styles["BulletItem"]))
     story.append(Paragraph("• <b>Level 1 (Mid-Near, 10.0m to 25.0m):</b> delta = 0.10m (10 cm resolution) — Low-speed maneuvering & turning zone.", styles["BulletItem"]))
-    story.append(Paragraph("• <b>Level 2 (Mid-Range, 25.0m to 50.0m):</b> delta = 0.25m (25 cm resolution) — Dynamic actor tracking zone.", styles["BulletItem"]))
+    story.append(Paragraph("• <b>Level 2 (Mid-Range, 25.0m to 50.0m):</b> delta = 0.20m (20 cm resolution) — Dynamic actor tracking zone.", styles["BulletItem"]))
     story.append(Paragraph("• <b>Level 3 (Far-Field, 50.0m to 100.0m):</b> delta = 0.50m (50 cm resolution) — Broad highway situational awareness.", styles["BulletItem"]))
 
     story.append(Paragraph(

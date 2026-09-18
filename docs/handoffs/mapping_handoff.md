@@ -259,7 +259,7 @@ python -m tests.mapping.test_hazard_scenarios
 # 4. Run entire repository test suite
 pytest -v
 ```
-**Repository Test Status:** **194 passed, 1 skipped** (in Python 3.10 minimal venv; 195 passed in Python 3.14).
+**Repository Test Status:** **203 passed, 1 skipped (204 collected)** — test suite green.
 
 ---
 
